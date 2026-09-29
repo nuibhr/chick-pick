@@ -1,0 +1,174 @@
+import { Router, type RequestHandler } from 'express';
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
+import path from 'node:path';
+import { categories, type FinanceRow, type FinanceReport } from '../src/financeTypes';
+import type { Enrollment } from '../src/coachingTypes';
+import { defaultRevenueConfig, revenueUnits } from './revenue';
+import type { RevenueConfig, RevenueUnit } from '../src/revenueTypes';
+import type { MarketplaceData } from '../src/marketplaceTypes';
+
+export const thaiDate = (date = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+const validDate = (s: unknown): s is string => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && Number.isFinite(Date.parse(s)) && new Date(s).toISOString().slice(0, 10) === s;
+function read<T>(file: string, fallback: T): T { return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : fallback; }
+function save(file: string, value: unknown) { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file + '.tmp', JSON.stringify(value, null, 2)); renameSync(file + '.tmp', file); }
+const incomeCategories = ['coaching', 'game', 'other_income'];
+
+export function summarize(rows: FinanceRow[]): FinanceReport {
+  const sum = (type: string, status: string) => rows.filter(r => r.type === type && r.status === status).reduce((a, r) => a + r.amount, 0);
+  const income = sum('income', 'settled'), expense = sum('expense', 'settled');
+  const daily = new Map<string, { date: string; income: number; expense: number }>();
+  const breakdown = new Map<string, FinanceReport['breakdown'][number]>();
+  for (const row of rows.filter(r => r.status === 'settled')) {
+    const date = row.settledOn || row.date;
+    const point = daily.get(date) || { date, income: 0, expense: 0 }; point[row.type] += row.amount; daily.set(date, point);
+    const group = breakdown.get(row.category) || { category: row.category, amount: 0, type: row.type }; group.amount += row.amount; breakdown.set(row.category, group);
+  }
+  return { rows, summary: { income, expense, net: income - expense, pendingIncome: sum('income', 'pending'), pendingExpense: sum('expense', 'pending') }, daily: [...daily.values()].sort((a, b) => a.date.localeCompare(b.date)), breakdown: [...breakdown.values()].sort((a, b) => b.amount - a.amount) };
+}
+
+export function createFinance(directory = path.resolve('data'), enabled = process.env.NODE_ENV !== 'production') {
+  const router = Router();
+  const ledgerFile = path.join(directory, 'finance.json'), authFile = path.join(directory, 'admin.json');
+  const revenueFile = path.join(directory, 'revenue-config.json'), settlementFile = path.join(directory, 'revenue-settlements.json');
+  const sessions = new Map<string, number>();
+  const attempts = new Map<string, { count: number; until: number }>();
+  const cookie = (req: any) => String(req.headers.cookie || '').split(';').map((s: string) => s.trim()).find((s: string) => s.startsWith('cb_admin='))?.slice(9);
+  const authenticated = (req: any) => { const key = cookie(req); const expiry = key && sessions.get(key); if (key && expiry && expiry <= Date.now()) sessions.delete(key); return Boolean(expiry && expiry > Date.now()); };
+  const requireAdmin: RequestHandler = (req, res, next) => authenticated(req) ? next() : res.status(401).json({ message: 'กรุณาเข้าสู่ระบบแอดมิน' });
+  router.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); return enabled ? next() : res.status(503).json({ message: 'ระบบการเงินนี้เปิดเฉพาะโหมดทดสอบในเครื่อง ยังไม่เปิดใช้งานจริง' }); });
+  router.use((req, res, next) => {
+    if (req.method !== 'GET') {
+      const origin = req.headers.origin;
+      if (req.headers['sec-fetch-site'] === 'cross-site' || (origin && ![ `http://${req.headers.host}`, `https://${req.headers.host}` ].includes(origin))) return res.status(403).json({ message: 'ไม่อนุญาตคำขอข้ามเว็บไซต์' });
+    }
+    next();
+  });
+  router.get('/auth', (req, res) => res.json({ setupRequired: !existsSync(authFile), authenticated: authenticated(req) }));
+  router.post('/auth', (req, res) => {
+    const ip = req.ip || 'local'; const previous = attempts.get(ip); const attempt = previous && previous.until > Date.now() ? previous : { count: 0, until: Date.now() + 900000 };
+    if (attempt.count >= 8) return res.status(429).json({ message: 'ลองเข้าสู่ระบบหลายครั้งเกินไป กรุณารอ 15 นาที' });
+    attempt.count++; attempts.set(ip, attempt);
+    const { password, setup } = req.body || {};
+    if (typeof password !== 'string' || password.length < 12 || password.length > 128) return res.status(400).json({ message: 'ใช้รหัสผ่าน 12–128 ตัวอักษร' });
+    let stored = read<{ salt: string; hash: string } | null>(authFile, null);
+    if (!stored) {
+      const localAddress = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress || '');
+      const localHost = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(req.hostname);
+      if (!localAddress || !localHost) return res.status(403).json({ message: 'ตั้งผู้จัดครั้งแรกจาก localhost บนเครื่องเซิร์ฟเวอร์เท่านั้น' });
+      if (setup !== true) return res.status(409).json({ message: 'ต้องตั้งรหัสผ่านแอดมินครั้งแรก' });
+      const salt = randomBytes(16).toString('hex'); stored = { salt, hash: scryptSync(password, salt, 64).toString('hex') }; save(authFile, stored);
+    } else {
+      if (setup) return res.status(409).json({ message: 'มีบัญชีแอดมินแล้ว กรุณาเข้าสู่ระบบ' });
+      if (!timingSafeEqual(Buffer.from(stored.hash, 'hex'), scryptSync(password, stored.salt, 64))) return res.status(401).json({ message: 'รหัสผ่านไม่ถูกต้อง' });
+    }
+    attempts.delete(ip); const token = randomBytes(32).toString('hex'); sessions.set(token, Date.now() + 8 * 3600000);
+    res.cookie('cb_admin', token, { httpOnly: true, sameSite: 'strict', path: '/api', secure: process.env.NODE_ENV === 'production', maxAge: 8 * 3600000 });
+    res.json({ authenticated: true });
+  });
+  router.post('/logout', (req, res) => { sessions.delete(cookie(req) || ''); res.clearCookie('cb_admin', { path: '/api' }); res.json({ success: true }); });
+  router.use(requireAdmin);
+  const getRows = (): FinanceRow[] => {
+    const manual = read<FinanceRow[]>(ledgerFile, []);
+    const enrollments = read<Enrollment[]>(path.join(directory, 'coaching.json'), []);
+    const coaching: FinanceRow[] = enrollments.map(e => ({ id: 'coach_' + e.id, type: 'income', category: 'coaching', amount: Math.round(e.amount * 100), description: e.title, counterparty: e.student, date: thaiDate(new Date(e.createdAt)), settledOn: e.paidAt ? thaiDate(new Date(e.paidAt)) : undefined, method: e.paymentMethod === 'cash' ? 'cash' : 'transfer', status: e.payment === 'paid' ? 'settled' : 'pending', source: 'coaching', reference: e.id, createdAt: e.createdAt, history: [{ at: e.createdAt, action: 'สมัครเรียน' }, ...(e.paidAt ? [{ at: e.paidAt, action: 'โค้ชยืนยันรับเงิน (ทดลอง)' }] : [])] }));
+    const marketplace = read<MarketplaceData>(path.join(directory, 'marketplace.json'), { sessions: [], bookings: [] });
+    const games: FinanceRow[] = marketplace.bookings.filter(b => !manual.some(r => r.source === 'game' && r.reference === `${b.sessionId}:${b.playerId}`)).map(b => ({ id: 'booking_' + b.id, type: 'income', category: 'game', amount: b.amount, description: b.title, counterparty: b.playerName, date: thaiDate(new Date(b.createdAt)), settledOn: b.paidAt ? thaiDate(new Date(b.paidAt)) : undefined, method: b.paymentMethod || 'transfer', status: b.cancelledAt ? 'void' : b.paidAt ? 'settled' : 'pending', source: 'game', reference: `${b.sessionId}:${b.playerId}`, createdAt: b.createdAt, history: [{ at: b.createdAt, action: 'บันทึกการจอง (ยังไม่รับเงินจริง)' }, ...(b.paidAt ? [{ at: b.paidAt, action: 'ผู้จัดยืนยันรับเงิน' }] : []), ...(b.cancelledAt ? [{ at: b.cancelledAt, action: b.cancelledBy === 'player' ? 'ผู้เล่นยกเลิกการจอง' : 'ผู้จัดยกเลิกการจอง' }] : [])] }));
+    return [...manual, ...coaching, ...games];
+  };
+  const filter = (query: any) => {
+    if ((query.from && !validDate(query.from)) || (query.to && !validDate(query.to)) || (query.from && query.to && query.from > query.to)) throw new Error('ช่วงวันที่ไม่ถูกต้อง');
+    const q = String(query.q || '').trim().toLowerCase();
+    return getRows().filter(r => { const date = r.settledOn || r.date; return (!query.from || date >= query.from) && (!query.to || date <= query.to) && (!query.type || r.type === query.type) && (!query.status || r.status === query.status) && (!query.category || r.category === query.category) && (!q || `${r.description} ${r.counterparty} ${r.reference} ${r.id}`.toLowerCase().includes(q)); }).sort((a, b) => (b.settledOn || b.date).localeCompare(a.settledOn || a.date) || b.createdAt.localeCompare(a.createdAt));
+  };
+  const revenueState = () => {
+    const history = read<RevenueConfig[]>(revenueFile, []), config = history.at(-1) || defaultRevenueConfig;
+    const settlements = read<NonNullable<RevenueUnit['settlement'] & { key: string; rule: RevenueUnit['rule'] } >[]>(settlementFile, []);
+    const allRows = getRows();
+    const units = revenueUnits(allRows, config).map(unit => {
+      const settlement = settlements.find(s => s.key === unit.key);
+      if (!settlement) return unit;
+      return { ...unit, rule: settlement.rule, settlement, changed: unit.fingerprint !== settlement.fingerprint, gross: settlement.gross, refunds: settlement.refunds, directCosts: settlement.directCosts, processing: settlement.processing, distributable: settlement.distributable, platform: settlement.platform, partner: settlement.partner, remainingPartner: Math.max(0, settlement.partner - unit.paidPartner - unit.pendingPartner), overpaid: Math.max(0, unit.paidPartner + unit.pendingPartner - settlement.partner) };
+    });
+    return { config, history, units, unallocatedExpenses: allRows.filter(r => r.type === 'expense' && r.status !== 'void' && !r.allocationKey).reduce((s, r) => s + r.amount, 0) };
+  };
+  router.get('/revenue', (_req, res) => {
+    const state = revenueState();
+    const totals = { gross: 0, platform: 0, partner: 0, directCosts: 0, refunds: 0, processing: 0, remainingPartner: 0, deficit: 0, overpaid: 0 };
+    for (const unit of state.units) for (const k of Object.keys(totals)) totals[k] += unit[k];
+    res.json({ ...state, totals });
+  });
+  router.post('/revenue/config', (req, res) => {
+    const { game, coaching, expectedVersion } = req.body;
+    const valid = (r: any) => r && ['gross', 'margin'].includes(r.basis) && Number.isInteger(r.platformBps) && r.platformBps >= 0 && r.platformBps <= 10000 && Number.isInteger(r.processingBps) && r.processingBps >= 0 && r.processingBps <= 10000;
+    if (!valid(game) || !valid(coaching)) return res.status(400).json({ message: 'อัตราต้องอยู่ระหว่าง 0–100% และเลือกฐานคำนวณให้ครบ' });
+    const history = read<RevenueConfig[]>(revenueFile, []), previous = history.at(-1) || defaultRevenueConfig;
+    if (expectedVersion !== previous.version) return res.status(409).json({ message: 'มีการแก้สูตรจากหน้าต่างอื่น กรุณารีเฟรชก่อน' });
+    const config: RevenueConfig = { game, coaching, version: previous.version + 1, confirmed: true, updatedAt: new Date().toISOString() };
+    save(revenueFile, [...history, config]); res.json(config);
+  });
+  router.post('/revenue/settle', (req, res) => {
+    const state = revenueState(), unit = state.units.find(u => u.key === req.body.key);
+    if (!state.config.confirmed || !unit) return res.status(400).json({ message: 'บันทึกสูตรส่วนแบ่งและเลือกรายการก่อน' });
+    if (unit.settlement) return res.status(409).json({ message: 'ยืนยันยอดนี้แล้ว ไม่สร้างใบแบ่งรายได้ซ้ำ' });
+    if (unit.deficit || unit.overpaid) return res.status(409).json({ message: 'มีต้นทุนเกินยอดขายหรือจ่ายเกินส่วนแบ่ง ต้องตรวจยอดก่อน' });
+    if (req.body.fingerprint !== unit.fingerprint || req.body.configVersion !== state.config.version) return res.status(409).json({ message: 'ยอดหรือสูตรเปลี่ยนไป กรุณารีเฟรชเพื่อตรวจยอดล่าสุด' });
+    const snapshot = { id: randomUUID(), key: unit.key, createdAt: new Date().toISOString(), configVersion: state.config.version, fingerprint: unit.fingerprint, rule: unit.rule, platform: unit.platform, partner: unit.partner, gross: unit.gross, refunds: unit.refunds, directCosts: unit.directCosts, processing: unit.processing, distributable: unit.distributable };
+    save(settlementFile, [...read<any[]>(settlementFile, []), snapshot]); res.status(201).json(snapshot);
+  });
+  router.get('/report', (req, res) => { try { res.json(summarize(filter(req.query))); } catch (e) { res.status(400).json({ message: (e as Error).message }); } });
+  router.get('/export', (req, res) => {
+    try {
+      const cell = (v: unknown) => { let s = String(v ?? ''); if (/^[\s]*[=+\-@]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; };
+      const lines = [['เลขรายการ', 'วันที่', 'ประเภท', 'หมวดหมู่', 'รายละเอียด', 'ผู้รับ/ผู้จ่าย', 'จำนวนบาท', 'สถานะ', 'ช่องทาง', 'ที่มา', 'อ้างอิง'], ...filter(req.query).map(r => [r.id, r.settledOn || r.date, r.type === 'income' ? 'รายรับ' : 'รายจ่าย', categories[r.category], r.description, r.counterparty, (r.amount / 100).toFixed(2), r.status, r.method, r.source, r.reference])];
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8'); res.setHeader('Content-Disposition', 'attachment; filename="chick-pick-finance.csv"'); res.send('\uFEFF' + lines.map(line => line.map(cell).join(',')).join('\r\n'));
+    } catch (e) { res.status(400).json({ message: (e as Error).message }); }
+  });
+  router.post('/entries', (req, res) => {
+    const { type, category, description, counterparty, amount, date, method, status, reference, requestId, allocationKey } = req.body;
+    if (!['income', 'expense'].includes(type) || !Object.hasOwn(categories, category) || incomeCategories.includes(category) !== (type === 'income') || typeof amount !== 'number' || !Number.isSafeInteger(amount) || amount <= 0 || amount > 10000000000 || !validDate(date) || !['cash', 'transfer', 'card'].includes(method) || !['pending', 'settled'].includes(status) || typeof description !== 'string' || !description.trim() || description.length > 200 || typeof counterparty !== 'string' || !counterparty.trim() || counterparty.length > 100 || typeof reference !== 'string' || reference.length > 100 || typeof requestId !== 'string' || !/^[a-zA-Z0-9-]{16,80}$/.test(requestId)) return res.status(400).json({ message: 'ข้อมูลไม่ครบหรือยอดเงิน/หมวดหมู่ไม่ถูกต้อง' });
+    if (status === 'settled' && date > thaiDate()) return res.status(400).json({ message: 'รายการรับ/จ่ายแล้วต้องไม่เป็นวันที่ในอนาคต' });
+    const entries = read<FinanceRow[]>(ledgerFile, []);
+    const existing = entries.find(e => e.id === 'manual_' + requestId); if (existing) return res.json(existing);
+    if (['coach_payout', 'organizer'].includes(category) && !allocationKey) return res.status(400).json({ message: 'รายการจ่ายส่วนแบ่งต้องผูกกับก๊วนหรือคอร์ส' });
+    if (allocationKey) {
+      const unit = revenueState().units.find(u => u.key === allocationKey);
+      if (type !== 'expense' || !unit) return res.status(400).json({ message: 'เลือกรายการก๊วนหรือคอร์สที่ถูกต้องสำหรับค่าใช้จ่าย' });
+      if (['coach_payout', 'organizer'].includes(category)) {
+        if ((category === 'organizer') !== (unit.kind === 'game')) return res.status(400).json({ message: 'เลือกหมวดผู้จัดสำหรับก๊วน หรือจ่ายโค้ชสำหรับคอร์ส' });
+        if (!unit.settlement || unit.changed) return res.status(409).json({ message: 'ต้องยืนยันใบแบ่งรายได้ และยอดต้นทางต้องไม่เปลี่ยนก่อนบันทึกจ่ายส่วนแบ่ง' });
+        if (amount > unit.remainingPartner) return res.status(409).json({ message: 'ยอดจ่ายเกินส่วนแบ่งคงเหลือ (รวมรายการรอจ่ายแล้ว)' });
+      } else if (unit.settlement) return res.status(409).json({ message: 'ปิดยอดแบ่งรายได้แล้ว ไม่สามารถเพิ่มต้นทุนย้อนเข้ารายการนี้' });
+    }
+    const row: FinanceRow = { id: 'manual_' + requestId, type, category, description: description.trim(), counterparty: counterparty.trim(), amount, date, method, status, reference: reference.trim(), source: 'manual', createdAt: new Date().toISOString(), settledOn: status === 'settled' ? date : undefined, history: [{ at: new Date().toISOString(), action: 'แอดมินเพิ่มรายการ' }] };
+    if (allocationKey) row.allocationKey = allocationKey;
+    save(ledgerFile, [row, ...entries]); res.status(201).json(row);
+  });
+  router.post('/entries/:id', (req, res) => {
+    const entries = read<FinanceRow[]>(ledgerFile, []), row = entries.find(e => e.id === req.params.id);
+    if (!row || row.source !== 'manual') return res.status(409).json({ message: 'รายการอัตโนมัติต้องจัดการจากระบบต้นทาง' });
+    const { action, reason, settledOn } = req.body;
+    if (action === 'void' && row.allocationKey && !['coach_payout', 'organizer'].includes(row.category) && revenueState().units.find(u => u.key === row.allocationKey)?.settlement) return res.status(409).json({ message: 'ต้นทุนอยู่ในใบแบ่งรายได้ที่ปิดยอดแล้ว ไม่สามารถเปลี่ยนย้อนหลัง' });
+    if (!['settle', 'void'].includes(action)) return res.status(400).json({ message: 'คำสั่งไม่ถูกต้อง' });
+    if (action === 'settle') {
+      if (row.status === 'settled') return res.json(row);
+      if (row.allocationKey && ['coach_payout', 'organizer'].includes(row.category) && revenueState().units.find(u => u.key === row.allocationKey)?.changed) return res.status(409).json({ message: 'ยอดต้นทางเปลี่ยนหลังปิดยอด กรุณาตรวจสอบก่อนจ่าย' });
+      if (row.status !== 'pending' || !validDate(settledOn) || settledOn > thaiDate()) return res.status(400).json({ message: 'ระบุวันที่รับ/จ่ายจริง และต้องเป็นรายการที่รอดำเนินการ' });
+      row.status = 'settled'; row.settledOn = settledOn;
+    } else {
+      if (row.status === 'void') return res.json(row);
+      if (typeof reason !== 'string' || reason.trim().length < 3 || reason.length > 200) return res.status(400).json({ message: 'ระบุเหตุผลการยกเลิกอย่างน้อย 3 ตัวอักษร' });
+      row.status = 'void';
+    }
+    row.history.push({ at: new Date().toISOString(), action: action === 'settle' ? 'ยืนยันรับ/จ่ายแล้ว' : 'ยกเลิกรายการ', reason: action === 'void' ? reason.trim() : undefined }); save(ledgerFile, entries); res.json(row);
+  });
+  router.use((err: Error, _req: any, res: any, _next: any) => { console.error(err); res.status(500).json({ message: 'ไม่สามารถบันทึกข้อมูลบัญชี กรุณาลองใหม่' }); });
+  const recordGame = (sessionId: string, playerId: string, playerName: string, title: string, amount: number) => {
+    const entries = read<FinanceRow[]>(ledgerFile, []);
+    const reference = `${sessionId}:${playerId}`;
+    const existing = entries.find(r => r.source === 'game' && r.reference === reference); if (existing) return existing.id;
+    const row: FinanceRow = { id: randomUUID(), type: 'income', category: 'game', amount: Math.round(amount * 100), description: title, counterparty: playerName, date: thaiDate(), settledOn: thaiDate(), status: 'settled', method: 'card', source: 'game', reference, createdAt: new Date().toISOString(), history: [{ at: new Date().toISOString(), action: 'ชำระค่าก๊วนจำลอง' }] };
+    save(ledgerFile, [row, ...entries]); return row.id;
+  };
+  return { router, recordGame, requireAdmin };
+}

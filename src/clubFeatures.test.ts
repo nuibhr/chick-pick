@@ -1,0 +1,7 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { parseFeatures, requireFeature } from './clubFeatures';
+import { emptyBook, payment, award, redeem } from './clubEngine';
+test('new installations and malformed flags default to disabled',()=>{for(const raw of [null,{},'true',{championship:'true',rewards:1}])assert.deepEqual(parseFeatures(raw),{championship:false,rewards:false});});
+test('all four flag combinations enforce contribution, award and redemption policy',()=>{for(const championship of [false,true])for(const rewards of [false,true]){const flags={championship,rewards};for(const action of ['contribute','award','redeem'] as const){if(rewards&&(action!=='award'||championship))assert.doesNotThrow(()=>requireFeature(flags,action));else assert.throws(()=>requireFeature(flags,action));}}});
+test('disabling features prevents new mutations without losing existing balances or history',()=>{const b=emptyBook();payment(b,'paid',2000000,'2026-08');award(b,'2026-09','player');redeem(b,'player','grip','order');const before=structuredClone(b);const disabled=parseFeatures(null);assert.throws(()=>{requireFeature(disabled,'contribute');payment(b,'second',10000,'2026-09');});assert.throws(()=>{requireFeature(disabled,'award');award(b,'2026-10','player');});assert.throws(()=>{requireFeature(disabled,'redeem');redeem(b,'player','grip','order2');});assert.deepEqual(b,before);});

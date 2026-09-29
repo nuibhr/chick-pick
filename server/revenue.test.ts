@@ -1,0 +1,56 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import express from 'express';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { createFinance, thaiDate } from './finance';
+import { marketplaceRouter } from './marketplace';
+import { splitRevenue } from './revenue';
+test('revenue conserves satang and handles gross, margin, fees, refunds and deficits', () => {
+  const margin = splitRevenue(100000,10000,20000,{basis:'margin',platformBps:2500,processingBps:300});
+  assert.deepEqual(margin,{processing:3000,distributable:67000,deficit:0,platform:16750,partner:50250});
+  assert.equal(splitRevenue(100000,10000,20000,{basis:'gross',platformBps:2500,processingBps:300}).platform,22500);
+  const small=splitRevenue(101,0,0,{basis:'margin',platformBps:3333,processingBps:0}); assert.equal(small.partner+small.platform,101);
+  assert.equal(splitRevenue(100,150,20,{basis:'gross',platformBps:2500,processingBps:0}).deficit,70);
+});
+test('durable bookings, revenue locks, independent formulas and payout limits', async () => {
+ const dir=mkdtempSync(path.join(tmpdir(),'cb-revenue-')), file=path.join(dir,'marketplace.json');
+ const app=express();app.use(express.json());app.use('/market',marketplaceRouter(file,true));app.use('/finance',createFinance(dir,true).router);
+ const server=app.listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));
+ const root=`http://127.0.0.1:${(server.address() as any).port}`;let cookie='';
+ const call=async(url:string,body?:unknown)=>{const r=await fetch(root+url,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',Cookie:cookie},...(body===undefined?{}:{body:JSON.stringify(body)})});return {status:r.status,data:await r.json(),headers:r.headers};};
+ try {
+  assert.equal((await call('/finance/revenue')).status,401);
+  const auth=await call('/finance/auth',{password:'test-only-password',setup:true});cookie=auth.headers.get('set-cookie')!.split(';')[0];
+  let booked=await call('/market/bookings',{sessionId:'night-chicken',amount:1,playerId:'fake'});assert.equal(booked.status,201);assert.equal(booked.data.booking.amount,19000);
+  assert.equal((await call('/market/bookings',{sessionId:'night-chicken'})).data.repeated,true);
+  assert.equal(JSON.parse(readFileSync(file,'utf8')).bookings.length,1);
+  app.use('/reload',marketplaceRouter(file,true));assert.equal((await call('/reload')).data.bookings.length,1);
+  assert.equal((await call('/finance/revenue')).data.units.length,0);
+  assert.equal((await call('/market/bookings/'+booked.data.booking.id+'/payment',{method:'cash'})).status,200);
+  assert.equal((await call('/market/bookings/'+booked.data.booking.id+'/payment',{method:'cash'})).data.repeated,true);
+  assert.equal((await call('/market/bookings/'+booked.data.booking.id+'/cancel',{})).status,409);
+  let cfg={expectedVersion:0,game:{basis:'margin',platformBps:2500,processingBps:0},coaching:{basis:'gross',platformBps:1000,processingBps:200}};
+  assert.equal((await call('/finance/revenue/config',cfg)).status,200);assert.equal((await call('/finance/revenue/config',cfg)).status,409);
+  const draft={type:'expense',category:'venue',amount:3000,description:'Court',counterparty:'Venue',date:thaiDate(),method:'cash',status:'pending',reference:'',requestId:randomUUID(),allocationKey:'game:night-chicken'};
+  const cost=await call('/finance/entries',draft);assert.equal(cost.status,201);
+  let unit=(await call('/finance/revenue')).data.units[0];assert.equal(unit.platform,4000);assert.equal(unit.partner,12000);
+  assert.equal((await call('/finance/revenue/settle',{key:unit.key,fingerprint:'stale',configVersion:1})).status,409);
+  assert.equal((await call('/finance/revenue/settle',{key:unit.key,fingerprint:unit.fingerprint,configVersion:1})).status,201);
+  assert.equal((await call('/finance/entries/'+cost.data.id,{action:'settle',settledOn:thaiDate()})).status,200);
+  assert.equal((await call('/finance/entries/'+cost.data.id,{action:'void',reason:'test'})).status,409);
+  assert.equal((await call('/finance/entries',{...draft,requestId:randomUUID()})).status,409);
+  assert.equal((await call('/finance/revenue/config',{...cfg,expectedVersion:1,game:{...cfg.game,platformBps:5000}})).status,200);
+  unit=(await call('/finance/revenue')).data.units[0];assert.equal(unit.platform,4000);assert.equal(unit.changed,false);
+  const payout=await call('/finance/entries',{...draft,category:'organizer',amount:12000,requestId:randomUUID()});assert.equal(payout.status,201);
+  assert.equal((await call('/finance/entries',{...draft,category:'organizer',amount:1,requestId:randomUUID()})).status,409);
+  const data=JSON.parse(readFileSync(file,'utf8'));data.bookings[0].amount+=100;writeFileSync(file,JSON.stringify(data));
+  assert.equal((await call('/finance/entries/'+payout.data.id,{action:'settle',settledOn:thaiDate()})).status,409);
+  const beginner=data.sessions.find((s:any)=>s.id==='beginner'); beginner.capacity=4;data.bookings.push(...Array.from({length:4},(_,i)=>({id:randomUUID(),sessionId:'beginner',playerId:'p'+i,playerName:'test',amount:17000,title:'test',createdAt:new Date().toISOString()})));writeFileSync(file,JSON.stringify(data));
+  assert.equal((await call('/market/bookings',{sessionId:'beginner'})).status,409);
+  assert.equal((await call('/market/sessions',{title:'invalid'})).status,400);
+  data.sessions.find((s:any)=>s.id==='competitive').startsAt='2020-01-01';writeFileSync(file,JSON.stringify(data));assert.equal((await call('/market/bookings',{sessionId:'competitive'})).status,409);
+ } finally {await new Promise<void>(r=>server.close(()=>r()));rmSync(dir,{recursive:true});}
+});

@@ -1,0 +1,2 @@
+export type DuprRating = { id: string; name: string; singles: number | null; doubles: number | null; singlesReliable: boolean | null; doublesReliable: boolean | null; fetchedAt: string };
+export type DuprProfile = { id: string | null; configured: boolean; environment: 'uat' | 'production' | 'unconfigured'; state: 'not_configured' | 'unlinked' | 'ready' | 'error'; rating: DuprRating | null; message: string | null; pollSeconds: number; nextRefreshAt: string | null };

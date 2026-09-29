@@ -1,0 +1,6 @@
+{
+  "name": "Chick&Pick Pickleball Club",
+  "description": "ต้นแบบระบบจัดก๊วนพิเคิลบอล หน้าผู้เล่นผ่าน LINE LIFF พรีวิวเพื่อนร่วมก๊วน ระบบวนคอร์ท และหน้าแอดมินตรวจสลิปกับค่าคอมก่อนเปิดใช้งานจริง",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
