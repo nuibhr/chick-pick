@@ -12,7 +12,7 @@ test('LINE player surface exposes only public sessions and own bookings', async 
  const dir=mkdtempSync(path.join(tmpdir(),'cb-player-'));
  const file=path.join(dir,'marketplace.json');
  const app=express();app.use(express.json());
- marketplaceRouter(file,true);
+ app.use('/marketplace',marketplaceRouter(file,true));
  const alice='alice-valid-id-token-0123456789';
  const bob='bob-valid-id-token-012345678901';
  app.use('/player',playerRouter(file,'test-channel',async token=>{
@@ -44,12 +44,11 @@ test('LINE player surface exposes only public sessions and own bookings', async 
   assert.equal((await call('/player/bookings',bob)).data.bookings.length,0);
   assert.equal((await call('/player/bookings',alice)).data.bookings.length,1);
   const hidden=(await call('/player/sessions')).data.sessions.find((s:{id:string})=>s.id==='night-chicken');
-  assert.equal(hidden.joined,1);assert.equal(hidden.privateParticipantCount,1);assert.deepEqual(hidden.participants,[]);
+  assert.equal(hidden.joined,1);assert.equal(hidden.privateParticipantCount,0);assert.deepEqual(hidden.participants,[]);
   const saved=await call('/player/me/profile',alice,{discoverable:true,skill:3.5,bio:'ตีสนุกทุกวัน'});
   assert.equal(saved.status,200);
   const shown=(await call('/player/sessions')).data.sessions.find((s:{id:string})=>s.id==='night-chicken');
-  assert.equal(shown.participants.length,1);assert.equal(shown.privateParticipantCount,0);
-  assert.equal(shown.participants[0].name,'Alice');assert.equal(shown.participants[0].picture,'https://profile.line-scdn.net/test-alice');
+  assert.equal(shown.participants.length,0);assert.equal(shown.privateParticipantCount,0);
   assert.equal(JSON.stringify(shown).includes('line:alice'),false);assert.equal(JSON.stringify(shown).includes(alice),false);
   assert.equal((await call('/player/me',bob)).data.profile.discoverable,false);
   assert.equal((await call('/player/me/profile',alice,{discoverable:false,skill:null,bio:''})).status,200);
@@ -63,6 +62,17 @@ test('LINE player surface exposes only public sessions and own bookings', async 
   assert.ok((await call('/player/bookings',alice)).data.bookings[0].cancelledAt);
   assert.equal((await call('/player/bookings',alice,{sessionId:'night-chicken'})).status,201);
   assert.equal((await call('/player/bookings',alice)).data.bookings.at(-1).transferAccount.accountNumber,'0987654321');
+  const latest=(await call('/player/bookings',alice)).data.bookings.at(-1);
+  assert.equal((await call('/marketplace/bookings/'+latest.id+'/admission',undefined,{action:'approve'})).status,409);
+  assert.equal((await call('/marketplace/bookings/'+latest.id+'/payment',undefined,{method:'cash'})).status,200);
+  assert.equal((await call('/marketplace/bookings/'+latest.id+'/admission',undefined,{action:'approve'})).status,200);
+  const approved=(await call('/player/sessions')).data.sessions.find((s:{id:string})=>s.id==='night-chicken');
+  assert.equal(approved.participants.length,1);assert.equal(approved.participants[0].name,'Alice');
+  assert.equal(approved.participants[0].picture,'https://profile.line-scdn.net/test-alice');
+  assert.equal(JSON.stringify(approved).includes('line:alice'),false);assert.equal(JSON.stringify(approved).includes(alice),false);
+  assert.equal((await call('/player/bookings/'+latest.id+'/cancel',alice,{})).status,409);
+  assert.equal((await call('/marketplace/bookings/'+latest.id+'/admission',undefined,{action:'hold'})).status,200);
+  assert.equal((await call('/player/sessions')).data.sessions.find((s:{id:string})=>s.id==='night-chicken').participants.length,0);
   writeFileSync(path.join(dir,'revenue-settlements.json'),JSON.stringify([{key:'game:beginner'}]));
   assert.equal((await call('/player/bookings',bob,{sessionId:'beginner'})).status,409);
  }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));rmSync(dir,{recursive:true});}

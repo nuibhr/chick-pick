@@ -180,7 +180,7 @@
 .pa-profile-guide p { margin: 0; }
 .pa-profile-guide b { display: block; font-size: 12px; }
 .pa-profile-guide small { display: block; margin-top: 3px; color: #7c8e7f; font-size: 10px; }
-.pa-nav { position: fixed; z-index: 9; left: 50%; bottom: 0; width: min(100%, 520px); transform: translateX(-50%); display: grid; grid-template-columns: repeat(4, 1fr); padding: 7px 6px max(8px, env(safe-area-inset-bottom)); border-top: 1px solid #e1e9df; background: #ffffffed; backdrop-filter: blur(16px); box-shadow: 0 -8px 24px #173e300c; }
+.pa-nav { position: fixed; z-index: 9; left: 50%; bottom: 0; width: min(100%, 520px); transform: translateX(-50%); display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 7px 6px max(8px, env(safe-area-inset-bottom)); border-top: 1px solid #e1e9df; background: #ffffffed; backdrop-filter: blur(16px); box-shadow: 0 -8px 24px #173e300c; }
 .pa-nav button { min-height: 56px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; border: 0; border-radius: 11px; background: transparent; color: #8b9a8e; font-size: 10px; font-weight: 700; }
 .pa-nav button.active { color: #1c6541; }
 .pa-nav-icon { width: 35px; height: 32px; display: grid; place-items: center; border-radius: 10px; }

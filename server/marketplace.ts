@@ -57,7 +57,7 @@ export function marketplaceRouter(file = path.resolve('data/marketplace.json'), 
     if (existsSync(closedFile) && JSON.parse(readFileSync(closedFile, 'utf8')).some((u: any) => u.key === 'game:' + session.id)) return res.status(409).json({ message: 'ก๊วนนี้ปิดยอดแบ่งรายได้แล้ว' });
     if (Date.parse(session.startsAt) <= Date.now() || session.status === 'completed') return res.status(409).json({ message: 'ก๊วนนี้ปิดรับแล้ว' });
     if (data.bookings.filter(b => b.sessionId === session.id && activeBooking(b)).length >= session.capacity) return res.status(409).json({ message: 'ก๊วนเต็มแล้ว กรุณาเลือกก๊วนอื่น' });
-    const booking = { id: randomUUID(), sessionId: session.id, playerId: 'demo_player', playerName: 'Nui', amount: Math.round(session.price * 100), title: session.title, createdAt: new Date().toISOString(), transferAccount: readTransferAccount(file) || undefined };
+    const booking = { id: randomUUID(), sessionId: session.id, playerId: 'demo_player', playerName: 'Nui', amount: Math.round(session.price * 100), title: session.title, createdAt: new Date().toISOString(), admissionStatus: 'pending' as const, transferAccount: readTransferAccount(file) || undefined };
     data.bookings.push(booking); save(data); res.status(201).json({ success: true, booking, ...view(data), repeated: false });
   });
   router.post('/bookings/:id/payment', (req, res) => {
@@ -80,6 +80,18 @@ export function marketplaceRouter(file = path.resolve('data/marketplace.json'), 
     if (booking.receipts?.at(-1)?.status === 'pending') return res.status(409).json({ message: 'มีสลิปรอตรวจ กรุณาปฏิเสธสลิปก่อนยกเลิก' });
     booking.cancelledAt = new Date().toISOString(); booking.cancelledBy = 'organizer'; save(data);
     res.json({ booking, repeated: false });
+  });
+  router.post('/bookings/:id/admission', (req, res) => {
+    const action = req.body?.action;
+    if (action !== 'approve' && action !== 'hold') return res.status(400).json({ message: 'เลือกอนุมัติให้ลงสนามหรือพักรายชื่อ' });
+    const data = read(); const booking = data.bookings.find(b => b.id === req.params.id);
+    if (!booking) return res.status(404).json({ message: 'ไม่พบการจองนี้' });
+    if (booking.cancelledAt) return res.status(409).json({ message: 'รายการนี้ยกเลิกแล้ว' });
+    if (!booking.paidAt) return res.status(409).json({ message: 'ต้องตรวจและยืนยันการรับเงินก่อนเลือกคนลงสนาม' });
+    const status = action === 'approve' ? 'approved' : 'pending';
+    if (booking.admissionStatus === status) return res.json({ booking, repeated: true });
+    booking.admissionStatus = status; booking.admissionUpdatedAt = new Date().toISOString();
+    save(data); res.json({ booking, repeated: false });
   });
   router.get('/bookings/:id/receipts/:receiptId', (req, res) => {
     const booking = read().bookings.find(b => b.id === req.params.id);

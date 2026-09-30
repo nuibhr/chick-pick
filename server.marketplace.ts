@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import path from 'path';
-import { coachingRouter } from './server/coaching';
+import { coaches, coachingRouter } from './server/coaching';
+import { publicCoachCatalogRouter } from './server/coachCalendar';
 import { createFinance } from './server/finance';
 import { duprRouter } from './server/dupr';
 import { marketplaceRouter } from './server/marketplace';
@@ -18,7 +19,8 @@ app.use(express.urlencoded({ extended: true }));
 const finance = createFinance(dataDirectory);
 app.use('/api/finance', finance.router);
 app.use('/api/player', playerRouter(path.join(dataDirectory, 'marketplace.json')));
-app.use('/api/coaching', finance.requireAdmin, coachingRouter());
+app.use('/api/coach-catalog', publicCoachCatalogRouter(path.join(dataDirectory, 'coaching.slots.json'), path.join(dataDirectory, 'coaching.json'), coaches));
+app.use('/api/coaching', finance.requireAdmin, coachingRouter(path.join(dataDirectory, 'coaching.json')));
 app.use('/api/dupr', finance.requireAdmin, duprRouter());
 app.use('/api/marketplace', finance.requireAdmin, marketplaceRouter(path.join(dataDirectory, 'marketplace.json')));
 

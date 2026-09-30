@@ -41,7 +41,7 @@ export function playerRouter(file=path.resolve('data/marketplace.json'), channel
   if(typeof discoverable!=='boolean'||(skill!==null&&(!Number.isFinite(skill)||skill<2||skill>5||Math.abs(skill*10-Math.round(skill*10))>1e-7))||typeof bio!=='string'||bio.length>160)return res.status(400).json({message:'เลือกการแสดงโปรไฟล์ ระดับ 2.0–5.0 หรือยังไม่ระบุ และแนะนำตัวไม่เกิน 160 ตัวอักษร'});
   const data=read();const profile=updateProfile(data,res.locals.line as LineIdentity,{discoverable,skill,bio:bio.trim()});save(data);res.json({profile});
  });
- router.get('/bookings',identity,(_req,res)=>{const id=(res.locals.line as LineIdentity).sub;const data=read();res.json({bookings:data.bookings.filter(b=>b.playerId===`line:${id}`).map(b=>({id:b.id,sessionId:b.sessionId,amount:b.amount,title:b.title,transferAccount:b.transferAccount||null,createdAt:b.createdAt,paidAt:b.paidAt||null,cancelledAt:b.cancelledAt||null,receipt:b.receipts?.at(-1)?{id:b.receipts.at(-1)!.id,status:b.receipts.at(-1)!.status,ocr:b.receipts.at(-1)!.ocr,rejectReason:b.receipts.at(-1)!.rejectReason||null}:null}))});});
+ router.get('/bookings',identity,(_req,res)=>{const id=(res.locals.line as LineIdentity).sub;const data=read();res.json({bookings:data.bookings.filter(b=>b.playerId===`line:${id}`).map(b=>({id:b.id,sessionId:b.sessionId,amount:b.amount,title:b.title,transferAccount:b.transferAccount||null,createdAt:b.createdAt,paidAt:b.paidAt||null,admissionStatus:b.admissionStatus||'pending',cancelledAt:b.cancelledAt||null,receipt:b.receipts?.at(-1)?{id:b.receipts.at(-1)!.id,status:b.receipts.at(-1)!.status,ocr:b.receipts.at(-1)!.ocr,rejectReason:b.receipts.at(-1)!.rejectReason||null}:null}))});});
  router.post('/bookings',identity,(req:Request,res)=>{
   if(!enabled)return res.status(503).json({message:'ยังไม่เปิดรับจองจริง โปรดติดต่อผู้จัด'});
   const id=req.body?.sessionId;if(typeof id!=='string'||id.length>120)return res.status(400).json({message:'รหัสก๊วนไม่ถูกต้อง'});
@@ -49,7 +49,7 @@ export function playerRouter(file=path.resolve('data/marketplace.json'), channel
    const person=res.locals.line as LineIdentity;const playerId=`line:${person.sub}`;const existing=data.bookings.find(b=>b.sessionId===id&&b.playerId===playerId&&activeBooking(b));if(existing)return res.json({booking:{id:existing.id,sessionId:id},repeated:true});
   if(closed(id))return res.status(409).json({message:'ก๊วนนี้ปิดยอดแบ่งรายได้แล้ว'});
    if(session.status==='completed'||!Number.isFinite(Date.parse(session.startsAt))||Date.parse(session.startsAt)<=Date.now()||data.bookings.filter(b=>b.sessionId===id&&activeBooking(b)).length>=session.capacity)return res.status(409).json({message:'ก๊วนนี้ปิดรับหรือเต็มแล้ว'});
-  const booking:Booking={id:randomUUID(),sessionId:id,playerId,playerName:person.name,amount:Math.round(session.price*100),title:session.title,createdAt:new Date().toISOString(),transferAccount:readTransferAccount(file)||undefined};data.bookings.push(booking);save(data);res.status(201).json({booking:{id:booking.id,sessionId:id},repeated:false,message:'จองทดลองสำเร็จ · ยังไม่มีการชำระเงินจริง'});
+  const booking:Booking={id:randomUUID(),sessionId:id,playerId,playerName:person.name,amount:Math.round(session.price*100),title:session.title,createdAt:new Date().toISOString(),admissionStatus:'pending',transferAccount:readTransferAccount(file)||undefined};data.bookings.push(booking);save(data);res.status(201).json({booking:{id:booking.id,sessionId:id},repeated:false,message:'ส่งคำขอร่วมก๊วนแล้ว · ผู้จัดจะเลือกผู้ลงสนามหลังตรวจเงิน'});
   });
   router.post('/bookings/:id/receipt',identity,raw({type:['image/jpeg','image/png','image/webp'],limit:maxReceiptBytes}),async(req,res,next)=>{
    try {
@@ -78,6 +78,7 @@ export function playerRouter(file=path.resolve('data/marketplace.json'), channel
    const data=read();const booking=data.bookings.find(b=>b.id===req.params.id&&b.playerId===`line:${(res.locals.line as LineIdentity).sub}`);
    if(!booking)return res.status(404).json({message:'ไม่พบการจองของคุณ'});
    if(booking.cancelledAt)return res.json({cancelled:true,repeated:true});
+   if(booking.admissionStatus==='approved')return res.status(409).json({message:'ผู้จัดรับเข้าสนามแล้ว กรุณาติดต่อผู้จัดหากต้องการยกเลิก'});
    if(booking.receipts?.at(-1)?.status==='pending')return res.status(409).json({message:'สลิปกำลังรอตรวจ กรุณาติดต่อผู้จัดก่อนยกเลิก'});
    const session=data.sessions.find(s=>s.id===booking.sessionId);
    if(!session||session.status==='completed'||!Number.isFinite(Date.parse(session.startsAt))||Date.parse(session.startsAt)<=Date.now())return res.status(409).json({message:'ก๊วนเริ่มแล้ว กรุณาติดต่อผู้จัด'});

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Coach, Enrollment } from '../src/coachingTypes';
+import { calendarSlots, coachCalendarRouter } from './coachCalendar';
 
 export const coaches: Coach[] = [
   { id: 'bank', name: 'โค้ชแบงค์', initials: 'BK', specialty: 'เริ่มต้นอย่างมั่นใจ', bio: 'จับไม้ เสิร์ฟ รับลูก และกติกา เรียนทีละขั้นสำหรับคนที่เพิ่งเริ่มเล่น', venue: 'Chicken Court Club · ขอนแก่น', hourlyRate: 600, courses: [{ id: 'foundation', name: 'พื้นฐานแน่น พร้อมลงก๊วน', hours: 6, price: 3200 }, { id: 'starter', name: 'เริ่มเล่นเป็นใน 3 ชั่วโมง', hours: 3, price: 1700 }] },
@@ -12,6 +13,7 @@ export const coaches: Coach[] = [
 
 export function coachingRouter(file = path.resolve('data/coaching.json'), demo = process.env.NODE_ENV !== 'production') {
   const router = Router();
+  const calendarFile = file.replace(/\.json$/, '.slots.json');
   let enrollments: Enrollment[] = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : [];
   const commit = (next: Enrollment[]) => {
     mkdirSync(path.dirname(file), { recursive: true });
@@ -20,8 +22,14 @@ export function coachingRouter(file = path.resolve('data/coaching.json'), demo =
     enrollments = next;
   };
   // A local preview has no user identity. Never expose student data or mutations in production.
-  router.use((_req, res, next) => demo ? next() : res.status(503).json({ message: 'ระบบโค้ชยังไม่เปิดใช้งานจริง ต้องเชื่อมระบบสมาชิก สิทธิ์โค้ช และการชำระเงินก่อน' }));
-  router.get('/', (_req, res) => res.json({ coaches, enrollments, demo }));
+  router.use((req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (!demo) return res.status(503).json({ message: 'ระบบโค้ชยังไม่เปิดใช้งานจริง ต้องเชื่อมระบบสมาชิก สิทธิ์โค้ช และการชำระเงินก่อน' });
+    if (req.method !== 'GET' && (req.headers['sec-fetch-site'] === 'cross-site' || (req.headers.origin && ![`http://${req.headers.host}`, `https://${req.headers.host}`].includes(req.headers.origin)))) return res.status(403).json({ message: 'ไม่อนุญาตคำขอข้ามเว็บไซต์' });
+    next();
+  });
+  router.get('/', (_req, res) => res.json({ coaches, enrollments, slots: calendarSlots(calendarFile, enrollments), demo }));
+  router.use('/slots', coachCalendarRouter(calendarFile, coaches, () => enrollments));
   router.post('/enrollments', (req, res) => {
     const { coachId, courseId, hours, student, phone } = req.body;
     const coach = coaches.find(c => c.id === coachId);
@@ -45,14 +53,15 @@ export function coachingRouter(file = path.resolve('data/coaching.json'), demo =
     const item = enrollments.find(e => e.id === req.params.id);
     if (!item) return res.status(404).json({ message: 'ไม่พบรายการเรียน' });
     if (item.payment !== 'paid') return res.status(409).json({ message: 'รอยืนยันการรับเงินก่อนนัดเรียน' });
-    const { start, hours } = req.body;
+    const slot = calendarSlots(calendarFile, enrollments).find(s => s.id === req.body?.slotId && s.coachId === item.coachId);
+    if (!slot || slot.status !== 'open' || Date.parse(slot.start) <= Date.now()) return res.status(409).json({ message: 'ช่วงเวลานี้ไม่เปิดให้จอง กรุณาเลือกจากตารางโค้ช' });
+    const { start, hours } = slot;
     const time = Date.parse(start);
-    if (typeof start !== 'string' || !Number.isFinite(time) || time <= Date.now() || typeof hours !== 'number' || !Number.isFinite(hours) || hours < 0.5 || hours > 4 || hours % 0.5) return res.status(400).json({ message: 'เลือกวันเวลาในอนาคต และระยะเวลา 0.5–4 ชั่วโมง' });
     const reserved = item.lessons.filter(l => l.status !== 'cancelled').reduce((s, l) => s + l.hours, 0);
     if (reserved + hours > item.totalHours) return res.status(409).json({ message: 'ชั่วโมงคงเหลือไม่เพียงพอ' });
     const conflict = enrollments.filter(e => e.coachId === item.coachId).some(e => e.lessons.some(l => l.status !== 'cancelled' && time < Date.parse(l.start) + l.hours * 3600000 && time + hours * 3600000 > Date.parse(l.start)));
     if (conflict) return res.status(409).json({ message: 'โค้ชมีนัดในช่วงนี้แล้ว กรุณาเลือกเวลาอื่น' });
-    const updated = { ...item, lessons: [...item.lessons, { id: randomUUID(), start: new Date(time).toISOString(), hours, status: 'scheduled' as const }] };
+    const updated = { ...item, lessons: [...item.lessons, { id: randomUUID(), slotId: slot.id, start: new Date(time).toISOString(), hours, status: 'scheduled' as const }] };
     commit(enrollments.map(e => e.id === item.id ? updated : e));
     res.status(201).json(updated);
   });

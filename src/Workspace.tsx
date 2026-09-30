@@ -5,8 +5,8 @@ import { featureKey, parseFeatures, type ClubFeatures } from './clubFeatures';
 import './workspace.css';
 import IntegrationSettings from './IntegrationSettings';
 export type WorkspaceTab = 'overview'|'club'|'home'|'games'|'coaching'|'organizer'|'profile'|'members'|'settings';
-const menu = [ ['overview',LayoutDashboard,'ภาพรวม'],['organizer',CalendarDays,'จัดการก๊วน'],['club',Radio,'สนามสด'],['members',UsersRound,'ผู้จองก๊วน'],['coaching',GraduationCap,'เรียนกับโค้ช'] ] as const;
-const labels:Record<WorkspaceTab,string>={overview:'ภาพรวม',organizer:'จัดการก๊วน',club:'สนามสด',members:'ผู้จองก๊วน',coaching:'เรียนกับโค้ช',settings:'ตั้งค่า workspace',home:'หาก๊วน',games:'การจองของฉัน',profile:'โปรไฟล์'};
+const menu = [ ['overview',LayoutDashboard,'ภาพรวม'],['organizer',CalendarDays,'จัดก๊วนและรับคน'],['club',Radio,'จัดคิวสนาม'],['coaching',GraduationCap,'ตารางโค้ช'] ] as const;
+const labels:Record<WorkspaceTab,string>={overview:'ภาพรวม',organizer:'จัดก๊วนและรับคน',club:'จัดคิวสนาม',members:'ผู้จองก๊วน',coaching:'ตารางโค้ช',settings:'ตั้งค่า workspace',home:'หาก๊วน',games:'การจองของฉัน',profile:'โปรไฟล์'};
 export function WorkspaceShell({tab,navigate,create,children}:{tab:WorkspaceTab;navigate:(t:WorkspaceTab)=>void;create:()=>void;children:React.ReactNode}){
  const [mobile,setMobile]=useState(false);
  const go=(t:WorkspaceTab)=>{navigate(t);setMobile(false);};

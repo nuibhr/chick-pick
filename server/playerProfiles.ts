@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { activeBooking, type MarketplaceData, type MemberProfile, type PlayerProfile, type PublicParticipant } from '../src/marketplaceTypes';
+import { admittedBooking, type MarketplaceData, type MemberProfile, type PlayerProfile, type PublicParticipant } from '../src/marketplaceTypes';
 
 export type LineIdentity = { sub: string; name: string; picture?: string | null };
 
@@ -31,7 +31,7 @@ export function updateProfile(data: MarketplaceData, person: LineIdentity, setti
 }
 
 export function participantPreview(data: MarketplaceData, sessionId: string, upcoming: boolean) {
-  const joined = data.bookings.filter(b => b.sessionId === sessionId && activeBooking(b));
+  const joined = data.bookings.filter(b => b.sessionId === sessionId && admittedBooking(b));
   // Completed sessions keep financial history but do not publish a past attendance directory.
   const participants = upcoming ? joined.flatMap(booking => {
     const profile = data.profiles?.find(p => p.playerId === booking.playerId && p.discoverable);
