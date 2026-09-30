@@ -29,10 +29,10 @@ No channel secret belongs in a `VITE_` variable or in Git.
 
 ## 3. Slip OCR
 
-Deploy `nuibhr/line-bill-scanner` as a **private** Hugging Face Docker Space.
+Deploy `nuibhr/line-bill-scanner` as a **private** Hugging Face Gradio Space on ZeroGPU.
 Set the following in the Chick&Pick server environment:
 
-- `HF_OCR_ENDPOINT_URL=https://<private-space-host>/ocr`
+- `HF_OCR_ENDPOINT_URL=https://<private-space-host>`
 - `HF_OCR_TOKEN=<private read token>`
 
 OCR is review assistance only. An organizer must compare the original image,
