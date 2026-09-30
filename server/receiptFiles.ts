@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { ReceiptSubmission } from '../src/marketplaceTypes';
 
@@ -15,12 +15,19 @@ export function validReceiptImage(bytes: Buffer, contentType: string): contentTy
 
 const directory = (marketplaceFile: string) => path.join(path.dirname(marketplaceFile), 'receipts');
 
-export function storeReceiptImage(marketplaceFile: string, bytes: Buffer, mimeType: ReceiptSubmission['mimeType']) {
-  const id = randomUUID();
+export function storeReceiptImage(marketplaceFile: string, bytes: Buffer, mimeType: ReceiptSubmission['mimeType'], receiptId: string = randomUUID()) {
+  const id = receiptId;
   const fileName = `${id}.${formats[mimeType]}`;
   mkdirSync(directory(marketplaceFile), { recursive: true, mode: 0o700 });
   writeFileSync(path.join(directory(marketplaceFile), fileName), bytes, { flag: 'wx', mode: 0o600 });
   return { id, fileName };
+}
+
+export function removeReceiptImage(marketplaceFile: string, receipt: ReceiptSubmission) {
+  const extension = formats[receipt.mimeType];
+  if (!extension || receipt.fileName !== `${receipt.id}.${extension}` || !/^[0-9a-f-]{36}$/.test(receipt.id)) return;
+  const file = path.join(directory(marketplaceFile), receipt.fileName);
+  if (existsSync(file)) unlinkSync(file);
 }
 
 export function loadReceiptImage(marketplaceFile: string, receipt: ReceiptSubmission) {

@@ -15,3 +15,17 @@ services:
         value: production
       - key: NODE_VERSION
         value: 24.21.0
+      - key: APP_LIVE_MODE
+        value: "false"
+      - key: TIDB_DATABASE_URL
+        sync: false
+      - key: LINE_CHANNEL_ID
+        sync: false
+      - key: VITE_LIFF_ID
+        sync: false
+      - key: HF_OCR_ENDPOINT_URL
+        sync: false
+      - key: HF_OCR_TOKEN
+        sync: false
+      - key: ADMIN_SETUP_TOKEN
+        sync: false
