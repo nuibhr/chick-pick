@@ -1,0 +1,17 @@
+# HTTPS preview for LINE identity and the public game catalog only.
+# NODE_ENV=production intentionally disables booking, receipt review and finance writes.
+services:
+  - type: web
+    name: chick-pick-liff-preview
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: off
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 24.21.0
