@@ -3,6 +3,9 @@
   "name": "chick-pick-tidb-staging",
   "main": "cloudflare/tidbPreview.ts",
   "compatibility_date": "2026-10-01",
+  "kv_namespaces": [
+    { "binding": "RECEIPTS", "id": "9341f6d177bb4b23a33a0e5874583d9c" }
+  ],
   "assets": {
     "directory": "./dist-client",
     "binding": "ASSETS",

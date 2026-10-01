@@ -2,7 +2,7 @@
 
 URL สำหรับทดสอบการอ่านข้อมูล TiDB: `https://chick-pick-tidb-staging.nuibhr1.workers.dev/miniapp`
 
-Worker นี้อ่านเอกสาร `marketplace` จาก TiDB ผ่าน TiDB Cloud Serverless HTTP driver. หน้า Mini App, `/api/health`, `/api/player/config`, `/api/player/sessions` และตารางโค้ชตัวอย่างใช้ได้บน HTTPS. ข้อมูลก๊วนมาจาก TiDB เดิม แต่การจอง, LINE identity, อัปโหลดและตรวจสลิป, แอดมิน, การเงิน และ OCR ยังปิดบน URL นี้ทั้งหมด. `/api/health` ต้องแสดง `mode: tidb-readonly-preview` และ `database: tidb`; คำสั่ง POST ต้องตอบ 503.
+Worker นี้อ่านเอกสาร `marketplace` จาก TiDB ผ่าน TiDB Cloud Serverless HTTP driver. หน้า Mini App, `/api/health`, `/api/player/config`, `/api/player/sessions` และตารางโค้ชตัวอย่างใช้ได้บน HTTPS. ข้อมูลก๊วนมาจาก TiDB เดิม. มี KV namespace `chick-pick-staging-receipts` แยกไว้สำหรับภาพสลิปในรอบทดลอง แต่ยังไม่มี route เขียนหรืออ่านภาพจากภายนอก. การจอง, LINE identity, อัปโหลดและตรวจสลิป, แอดมิน, การเงิน และ OCR ยังปิดบน URL นี้ทั้งหมด. `/api/health` ต้องแสดง `mode: tidb-readonly-preview`, `database: tidb` และ `receiptStorageConfigured: true`; คำสั่ง POST ต้องตอบ 503.
 
 พรีวิวเดิม `https://chick-pick-preview.nuibhr1.workers.dev/miniapp` ยังเป็น static preview แยกกัน. ห้ามใช้ URL ใดรับเงินหรือให้ผู้เล่นจองจนกว่าจะผ่านการทดสอบระบบจริงครบ.
 
@@ -20,7 +20,7 @@ npx wrangler deploy --config wrangler.tidb.jsonc
 ## ขั้นก่อนเปิดรับเงินจริง
 
 1. พอร์ต admin auth และทุก mutation ไปยัง TiDB HTTP driver พร้อม transaction และ rate limit ที่คงอยู่ข้าม Worker isolates. ตรวจขอบเขต CPU 10 ms ของ Workers Free โดยเฉพาะ password hashing, JSON document โตขึ้น และภาพสลิป.
-2. เก็บภาพสลิปใน private durable storage ที่ตรวจสิทธิ์ฝั่ง server แล้วทดสอบอัปโหลด/อ่าน/ลบ/สำรอง; อย่าใช้ `node:fs` บน Worker เป็นที่เก็บถาวร.
+2. ผูกการอัปโหลดสลิปกับ KV โดยใช้ key สุ่มรายภาพ, ตรวจสิทธิ์ฝั่ง server ทุกครั้งที่อ่าน และลบ key หาก transaction ใน TiDB ล้มเหลว. ทดสอบอัปโหลด/อ่าน/ลบ/สำรองและกำหนดอายุข้อมูล; อย่าใช้ `node:fs` บน Worker เป็นที่เก็บถาวร. Workers KV Free จำกัด 1 GB และ 1,000 writes/วัน จึงต้องติดตามการใช้จริงก่อนขยายก๊วน.
 3. สร้าง LINE Login channel กับ LIFF บน URL HTTPS นี้, ตั้ง `LINE_CHANNEL_ID` และ `VITE_LIFF_ID` ตามระบบ build/runtime, ทดสอบ ID token บนมือถือ. เปิดรับจองเมื่อ auth, สิทธิ์ผู้จัด, capacity และ idempotency ผ่านการทดสอบพร้อมกัน.
 4. ทดสอบเส้นทางเงินจริงแบบปิด: จอง → แนบสลิป → แอดมินเทียบยอดเงินเข้าบัญชีจริง → อนุมัติ/ปฏิเสธ → เลือกคนลงสนาม → ตรวจรายรับและค่าคอม → คืนเงิน/แก้ยอด. OCR เป็นข้อมูลช่วยอ่าน ไม่ใช่หลักฐานว่าเงินเข้า.
 

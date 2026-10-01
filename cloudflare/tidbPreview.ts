@@ -5,6 +5,7 @@ import { coaches } from '../server/coachCatalog';
 type Env = {
   ASSETS: { fetch(request: Request): Promise<Response> };
   TIDB_DATABASE_URL?: string;
+  RECEIPTS?: unknown;
 };
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -81,7 +82,7 @@ export default {
         const data = await readMarketplace(env.TIDB_DATABASE_URL);
         if (pathname === '/api/health') return json({
           status: 'ok', mode: 'tidb-readonly-preview', database: 'tidb',
-          lineConfigured: false, ocrConfigured: false,
+          lineConfigured: false, ocrConfigured: false, receiptStorageConfigured: Boolean(env.RECEIPTS),
         });
         return json({ sessions: data.sessions.map(session => publicSession(session, data.bookings, data.profiles)) });
       } catch (error) {
