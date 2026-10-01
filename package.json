@@ -2,7 +2,9 @@
   "name": "chick-pick",
   "private": true,
   "version": "0.1.0",
-  "engines": { "node": ">=22 <26" },
+  "engines": {
+    "node": ">=22 <26"
+  },
   "type": "module",
   "scripts": {
     "dev": "tsx server.marketplace.ts",
@@ -18,6 +20,7 @@
     "@google/genai": "^2.4.0",
     "@line/liff": "^2.31.0",
     "@tailwindcss/vite": "^4.1.14",
+    "@tidbcloud/serverless": "^0.3.0",
     "@vitejs/plugin-react": "^5.0.4",
     "canvas-confetti": "^1.9.4",
     "dotenv": "^17.2.3",

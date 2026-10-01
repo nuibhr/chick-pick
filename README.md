@@ -52,3 +52,5 @@ See README-LINE-WORKSPACE.md, README-OCR.md, README-COACHING.md and README-ADMIN
 For an isolated sample without touching `data/`, set `APP_DATA_DIR` to a separate local directory. The sample preview used during development lives in ignored `.preview-data/`.
 
 For a from-scratch hosted pilot plan, see [PRODUCTION-START-HERE.md](PRODUCTION-START-HERE.md). For an HTTPS page to start LINE LIFF identity testing, see [README-HTTPS-LINE-SETUP.md](README-HTTPS-LINE-SETUP.md). Do not expose the current prototype publicly for bookings until its production readiness items are complete.
+
+The Cloudflare Workers Free TiDB read-only staging deployment and remaining live-booking requirements are documented in [README-CLOUDFLARE-FREE.md](README-CLOUDFLARE-FREE.md).
