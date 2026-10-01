@@ -1,5 +1,7 @@
 # เริ่ม HTTPS และ LINE LIFF แบบดูหน้าแอปก่อน
 
+> แผน Render ด้านล่างเป็นทางเลือกเดิม. ขณะนี้มี Cloudflare Workers Free staging ที่อ่านก๊วนจาก TiDB จริงแล้ว: ดู [README-CLOUDFLARE-FREE.md](README-CLOUDFLARE-FREE.md). ยังไม่เปิด LINE Login, การจอง หรือสลิปบน staging.
+
 ไฟล์ `render.yaml` เตรียมเว็บพรีวิวบน Render จาก private repo `nuibhr/chick-pick` ไว้แล้ว เว็บพรีวิวนี้ตั้ง `NODE_ENV=production` จึงเปิดดูหน้า Open Play และทดสอบการยืนยันบัญชี LINE ได้ แต่ API จอง ส่งสลิป แอดมิน และการเงินยังปิดไว้ ไม่มีการรับเงินจริง
 
 1. เข้าบัญชี Render ของตัวเองและเชื่อม GitHub ให้เข้าถึง private repo `nuibhr/chick-pick` เฉพาะเท่าที่จำเป็น สร้าง Blueprint จาก `render.yaml` หลังดูแผนและค่าใช้จ่ายในหน้าสรุป Render แล้ว หน้าเว็บจะมี HTTPS URL ของตัวเองในรูปแบบ `https://<service>.onrender.com`

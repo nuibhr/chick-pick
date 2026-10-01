@@ -37,10 +37,10 @@ npm run build
 
 ## MVP limitations / next priorities
 
-This is a local development prototype. Bookings and payment confirmations do not charge or transfer real money. Production APIs intentionally remain disabled pending production integration.
+The local development server remains a prototype. A separate Cloudflare staging URL reads public sessions from TiDB, while booking and payment APIs remain disabled there. Bookings and payment confirmations do not charge or transfer real money.
 
 1. Configure a LINE Login channel and LIFF ID on an HTTPS endpoint. Add organizer/coach roles and ownership checks; the single local organizer password and coaching demo access are not a production identity system.
-2. Replace JSON storage with a transactional database and private durable receipt storage; add bank reconciliation, backups and retry handling. Receipt approval stays manual until a verified bank integration exists.
+2. Finish the TiDB-backed Workers API for every mutable route and private durable receipt storage; add bank reconciliation, backups and retry handling. Local coaching and DUPR state still use files. Receipt approval stays manual until a verified bank integration exists.
 3. Define paid-booking refunds and settlement reversal/correction workflows, coach availability and course expiry. Unpaid bookings can now be cancelled, but they do not expire automatically.
 4. Separate estimated fees from actual provider fees and reconcile platform operating expenses before treating any displayed share as profit.
 5. Finish mobile browser acceptance testing and operational monitoring before public launch.

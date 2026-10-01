@@ -1,5 +1,7 @@
 # เริ่มเปิด Chick&Pick ให้ทดลองผ่าน LINE
 
+> เอกสารนี้เป็นแผนเก่าก่อนเลือก TiDB และ Cloudflare Workers Free. สถานะ deployment ปัจจุบันและขั้นตอนต่อไปอยู่ใน [README-CLOUDFLARE-FREE.md](README-CLOUDFLARE-FREE.md); อย่าตั้ง PostgreSQL/Render ตามขั้นด้านล่างสำหรับ staging ปัจจุบัน.
+
 เอกสารนี้เป็นแผนเริ่มต้นสำหรับกรณีที่ยังไม่มีโดเมน/URL, LINE Developers channel หรือ OCR endpoint
 
 ## สถานะตอนนี้
