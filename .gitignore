@@ -3,6 +3,8 @@ data/
 .preview-data/
 build/
 dist/
+dist-client/
+.wrangler/
 coverage/
 .DS_Store
 *.log

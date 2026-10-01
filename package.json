@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "tsx server.marketplace.ts",
     "build": "vite build && esbuild server.marketplace.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build:cloudflare": "vite build --outDir dist-client",
     "start": "node dist/server.cjs",
     "db:migrate": "tsx server/migrateTidb.ts",
     "preview": "vite preview",
