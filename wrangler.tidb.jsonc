@@ -3,6 +3,10 @@
   "name": "chick-pick-tidb-staging",
   "main": "cloudflare/tidbPreview.ts",
   "compatibility_date": "2026-10-01",
+  "vars": {
+    "LINE_CHANNEL_ID": "2011829684",
+    "VITE_LIFF_ID": "2011829684-nZbaL7lP"
+  },
   "kv_namespaces": [
     { "binding": "RECEIPTS", "id": "9341f6d177bb4b23a33a0e5874583d9c" }
   ],

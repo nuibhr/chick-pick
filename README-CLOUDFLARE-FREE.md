@@ -2,7 +2,7 @@
 
 URL สำหรับทดสอบการอ่านข้อมูล TiDB: `https://chick-pick-tidb-staging.nuibhr1.workers.dev/miniapp`
 
-Worker นี้อ่านเอกสาร `marketplace` จาก TiDB ผ่าน TiDB Cloud Serverless HTTP driver. หน้า Mini App, `/api/health`, `/api/player/config`, `/api/player/sessions` และตารางโค้ชตัวอย่างใช้ได้บน HTTPS. ข้อมูลก๊วนมาจาก TiDB เดิม. มี KV namespace `chick-pick-staging-receipts` แยกไว้สำหรับภาพสลิปในรอบทดลอง แต่ยังไม่มี route เขียนหรืออ่านภาพจากภายนอก. `/api/player/me` และ `/api/player/bookings` รองรับการอ่านข้อมูลส่วนตัวหลังตรวจ ID token กับ LINE ฝั่ง server แล้ว แต่ยังต้องตั้งค่า channel/LIFF ก่อนทดสอบด้วยบัญชีจริง. การจอง, อัปโหลดและตรวจสลิป, แอดมิน, การเงิน และ OCR ยังปิดบน URL นี้. `/api/health` ต้องแสดง `mode: tidb-readonly-preview`, `database: tidb` และ `receiptStorageConfigured: true`; คำสั่ง POST ต้องตอบ 503.
+Worker นี้อ่านเอกสาร `marketplace` จาก TiDB ผ่าน TiDB Cloud Serverless HTTP driver. หน้า Mini App, `/api/health`, `/api/player/config`, `/api/player/sessions` และตารางโค้ชตัวอย่างใช้ได้บน HTTPS. ข้อมูลก๊วนมาจาก TiDB เดิม. มี KV namespace `chick-pick-staging-receipts` แยกไว้สำหรับภาพสลิปในรอบทดลอง แต่ยังไม่มี route เขียนหรืออ่านภาพจากภายนอก. `/api/player/me` และ `/api/player/bookings` รองรับการอ่านข้อมูลส่วนตัวหลังตรวจ ID token กับ LINE ฝั่ง server แล้ว. ตั้งค่า Developing channel/LIFF และ scopes `openid`, `profile` แล้ว ยังต้องทดสอบด้วยบัญชี LINE จริงบนมือถือ. การจอง, อัปโหลดและตรวจสลิป, แอดมิน, การเงิน และ OCR ยังปิดบน URL นี้. `/api/health` ต้องแสดง `mode: tidb-readonly-preview`, `database: tidb` และ `receiptStorageConfigured: true`; คำสั่ง POST ต้องตอบ 503.
 
 พรีวิวเดิม `https://chick-pick-preview.nuibhr1.workers.dev/miniapp` ยังเป็น static preview แยกกัน. ห้ามใช้ URL ใดรับเงินหรือให้ผู้เล่นจองจนกว่าจะผ่านการทดสอบระบบจริงครบ.
 
@@ -21,7 +21,7 @@ npx wrangler deploy --config wrangler.tidb.jsonc
 
 1. พอร์ต admin auth และทุก mutation ไปยัง TiDB HTTP driver พร้อม transaction และ rate limit ที่คงอยู่ข้าม Worker isolates. ตรวจขอบเขต CPU 10 ms ของ Workers Free โดยเฉพาะ password hashing, JSON document โตขึ้น และภาพสลิป.
 2. ผูกการอัปโหลดสลิปกับ KV โดยใช้ key สุ่มรายภาพ, ตรวจสิทธิ์ฝั่ง server ทุกครั้งที่อ่าน และลบ key หาก transaction ใน TiDB ล้มเหลว. ทดสอบอัปโหลด/อ่าน/ลบ/สำรองและกำหนดอายุข้อมูล; อย่าใช้ `node:fs` บน Worker เป็นที่เก็บถาวร. Workers KV Free จำกัด 1 GB และ 1,000 writes/วัน จึงต้องติดตามการใช้จริงก่อนขยายก๊วน.
-3. สร้าง LINE MINI App channel กับ LIFF บน URL HTTPS นี้ตามขั้นด้านล่าง แล้วทดสอบ ID token บนมือถือ. เปิดรับจองเมื่อ auth, สิทธิ์ผู้จัด, capacity และ idempotency ผ่านการทดสอบพร้อมกัน.
+3. ทดสอบ LINE MINI App Developing ที่เชื่อมไว้ด้วย ID token บนมือถือ. เปิดรับจองเมื่อ auth, สิทธิ์ผู้จัด, capacity และ idempotency ผ่านการทดสอบพร้อมกัน.
 4. ทดสอบเส้นทางเงินจริงแบบปิด: จอง → แนบสลิป → แอดมินเทียบยอดเงินเข้าบัญชีจริง → อนุมัติ/ปฏิเสธ → เลือกคนลงสนาม → ตรวจรายรับและค่าคอม → คืนเงิน/แก้ยอด. OCR เป็นข้อมูลช่วยอ่าน ไม่ใช่หลักฐานว่าเงินเข้า.
 
 การทดสอบ `SELECT` จาก TiDB และหน้า HTTPS ไม่ยืนยันว่าขั้นตอนรับจองหรือรับเงินพร้อมใช้งาน.
@@ -29,6 +29,8 @@ npx wrangler deploy --config wrangler.tidb.jsonc
 ## เชื่อม LINE MINI App สำหรับ staging
 
 ใช้ provider Chick&Pick เดิม และเลือกประเทศไทย. การสร้าง channel ต้องให้เจ้าของบัญชียืนยันข้อตกลงและสิทธิ์ดำเนินการก่อน.
+
+สถานะที่ตรวจเมื่อ 2 ตุลาคม 2026: เจ้าของสร้าง MINI App แล้ว; Developing Channel ID `2011829684`, LIFF ID `2011829684-nZbaL7lP`, [ลิงก์ทดสอบบน LINE](https://miniapp.line.me/2011829684-nZbaL7lP). ตั้ง Endpoint ของ Developing และ scopes แล้ว. Worker version `51870282-3a89-4be2-ae84-07d8d06a59cb` ตอบ `connected: true`, `lineConfigured: true`; ไม่มี token หรือ token ปลอมได้ 401; booking POST ได้ 503. ลิงก์ MINI App บน desktop แสดง QR สำหรับมือถือ. ยังไม่ยืนยันผลล็อกอินของบัญชีจริง และยังไม่ได้เชื่อม Endpoint ของ Review/Published.
 
 1. ในแท็บ Web app settings ตั้ง Endpoint URL ของ Developing เป็น `https://chick-pick-tidb-staging.nuibhr1.workers.dev/miniapp` และตรวจ scopes `openid` กับ `profile`.
 2. คัดลอก Channel ID **ของ Developing** และ LIFF ID **ของ Developing** มาตั้ง Worker vars `LINE_CHANNEL_ID` และ `VITE_LIFF_ID` ใน `wrangler.tidb.jsonc`. ทั้งคู่เป็น public identifiers; ห้ามใส่ Channel secret หรือ access token ในไฟล์นี้. Worker ตรวจ ID token ผ่าน LINE โดยไม่ต้องใช้ Channel secret.
