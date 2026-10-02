@@ -61,14 +61,15 @@ export function ParticipantDialog({ person, close }: { person: PublicParticipant
   </div></PlayerDialog>;
 }
 
-export function ProfileEditor({ profile, busy, save }: { profile: PlayerProfile; busy: boolean; save: (value: PlayerProfile) => Promise<void> }) {
+export function ProfileEditor({ profile, busy, enabled = true, save }: { profile: PlayerProfile; busy: boolean; enabled?: boolean; save: (value: PlayerProfile) => Promise<void> }) {
   const [draft, setDraft] = useState(profile);
   useEffect(() => setDraft(profile), [profile]);
-  return <form className="pa-profile-editor" onSubmit={event => { event.preventDefault(); void save(draft); }}>
+  const disabled = busy || !enabled;
+  return <form className="pa-profile-editor" onSubmit={event => { event.preventDefault(); if (!disabled) void save(draft); }}>
     <h2>ให้เพื่อนรู้จักคุณ</h2><p>ชื่อและรูปมาจากบัญชี LINE ที่ยืนยันแล้ว</p>
-    <label className="pa-visibility"><input type="checkbox" role="switch" checked={draft.discoverable} disabled={busy} onChange={event => setDraft({ ...draft, discoverable: event.target.checked })} /><span><b>แสดงโปรไฟล์เมื่อผู้จัดรับเข้าสนาม</b><small>ทุกคนที่เปิดหน้าก๊วนจะเห็นชื่อ รูป ระดับ และคำแนะนำตัว ปิดเมื่อไรก็ได้</small></span></label>
-    <label className="pa-profile-field">ระดับการเล่น <select value={draft.skill ?? ''} disabled={busy} onChange={event => setDraft({ ...draft, skill: event.target.value === '' ? null : Number(event.target.value) })}><option value="">ยังไม่ระบุ</option>{Array.from({ length: 31 }, (_, i) => (20 + i) / 10).map(value => <option key={value} value={value}>{value.toFixed(1)}</option>)}</select><small>ระบุด้วยตัวเอง ยังไม่เชื่อมกับ DUPR</small></label>
-    <label className="pa-profile-field">แนะนำตัวสั้น ๆ <textarea maxLength={160} rows={3} value={draft.bio} disabled={busy} placeholder="ชอบตีชิลล์ ยินดีเล่นกับมือใหม่" onChange={event => setDraft({ ...draft, bio: event.target.value })} /><small>{draft.bio.length}/160 · หลีกเลี่ยงเบอร์โทรและข้อมูลส่วนตัว</small></label>
-    <button className="pa-save-profile" disabled={busy} type="submit">{busy ? 'กำลังบันทึก…' : 'บันทึกโปรไฟล์'}</button>
+    <label className="pa-visibility"><input type="checkbox" role="switch" checked={draft.discoverable} disabled={disabled} onChange={event => setDraft({ ...draft, discoverable: event.target.checked })} /><span><b>แสดงโปรไฟล์เมื่อผู้จัดรับเข้าสนาม</b><small>ทุกคนที่เปิดหน้าก๊วนจะเห็นชื่อ รูป ระดับ และคำแนะนำตัว ปิดเมื่อไรก็ได้</small></span></label>
+    <label className="pa-profile-field">ระดับการเล่น <select value={draft.skill ?? ''} disabled={disabled} onChange={event => setDraft({ ...draft, skill: event.target.value === '' ? null : Number(event.target.value) })}><option value="">ยังไม่ระบุ</option>{Array.from({ length: 31 }, (_, i) => (20 + i) / 10).map(value => <option key={value} value={value}>{value.toFixed(1)}</option>)}</select><small>ระบุด้วยตัวเอง ยังไม่เชื่อมกับ DUPR</small></label>
+    <label className="pa-profile-field">แนะนำตัวสั้น ๆ <textarea maxLength={160} rows={3} value={draft.bio} disabled={disabled} placeholder="ชอบตีชิลล์ ยินดีเล่นกับมือใหม่" onChange={event => setDraft({ ...draft, bio: event.target.value })} /><small>{draft.bio.length}/160 · หลีกเลี่ยงเบอร์โทรและข้อมูลส่วนตัว</small></label>
+    <button className="pa-save-profile" disabled={disabled} type="submit">{busy ? 'กำลังบันทึก…' : !enabled ? 'ยังไม่เปิดแก้โปรไฟล์' : 'บันทึกโปรไฟล์'}</button>
   </form>;
 }

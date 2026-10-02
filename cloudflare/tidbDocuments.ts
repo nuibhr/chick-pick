@@ -27,12 +27,14 @@ export class TidbDocuments {
     return data;
   }
 
-  async updateMarketplace<T>(mutate: (data: MarketplaceData) => T | Promise<T>): Promise<T> {
+  async updateMarketplace<T>(mutate: (data: MarketplaceData) => T | Promise<T>, audit?: { actorId: string; action: string; entityId: string }): Promise<T> {
     const tx = await this.db.begin();
     try {
       const data = document<MarketplaceData>((await tx.execute('SELECT payload FROM app_documents WHERE document_key = ? FOR UPDATE', ['marketplace'])).rows as Row[] | null);
       const result = await mutate(data);
       await tx.execute('UPDATE app_documents SET payload = ?, version = version + 1 WHERE document_key = ?', [JSON.stringify(data), 'marketplace']);
+      if (audit) await tx.execute('INSERT INTO audit_events (id, actor_type, actor_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [crypto.randomUUID(), 'line', audit.actorId, audit.action, 'player', audit.entityId, null]);
       await tx.commit();
       return result;
     } catch (error) {

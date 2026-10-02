@@ -5,7 +5,7 @@ import { activeBooking, type Booking, type MarketplaceData, type ReceiptSubmissi
 import { thaiDate } from './finance';
 import { maxReceiptBytes, validReceiptImage } from './receiptFiles';
 import { readSlipOcr } from './slipOcr';
-import { linePicture, ownProfile, participantPreview, updateProfile, type LineIdentity } from './playerProfiles';
+import { linePicture, ownProfile, participantPreview, profileSettings, updateProfile, type LineIdentity } from './playerProfiles';
 import { sameOriginWrites } from './requestSecurity';
 import { initialMarketplaceData } from './marketplace';
 import { marketplaceStore, type MarketplaceStore } from './marketplaceStore';
@@ -45,14 +45,14 @@ export function playerRouter(source: string | MarketplaceStore = path.resolve('d
   router.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
   router.use(sameOriginWrites);
   router.use((req, res, next) => { if (!writesEnabled && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return res.status(503).json({ message: 'ยังไม่เปิดรับรายการจริง โปรดติดต่อผู้จัด' }); next(); });
-  router.get('/config', (_req, res) => res.json({ liffId: process.env.VITE_LIFF_ID || null, connected: Boolean(channelId && process.env.VITE_LIFF_ID), bookingEnabled: Boolean(writesEnabled && store.kind === 'tidb' && channelId && process.env.VITE_LIFF_ID) }));
+  router.get('/config', (_req, res) => res.json({ liffId: process.env.VITE_LIFF_ID || null, connected: Boolean(channelId && process.env.VITE_LIFF_ID), profileEditingEnabled: Boolean(writesEnabled && channelId && process.env.VITE_LIFF_ID), bookingEnabled: Boolean(writesEnabled && store.kind === 'tidb' && channelId && process.env.VITE_LIFF_ID) }));
   router.get('/sessions', route(async (_req, res) => { const data = await store.read(); return res.json({ sessions: data.sessions.map(s => publicSession(s, data.bookings, data.profiles)) }); }));
   router.get('/me', identity, route(async (_req, res) => { const person = res.locals.line as LineIdentity; return res.json({ name: person.name, profile: ownProfile(await store.read(), person) }); }));
   router.post('/me/profile', identity, route(async (req, res) => {
-    const { discoverable, skill, bio } = req.body || {};
-    if (typeof discoverable !== 'boolean' || (skill !== null && (!Number.isFinite(skill) || skill < 2 || skill > 5 || Math.abs(skill * 10 - Math.round(skill * 10)) > 1e-7)) || typeof bio !== 'string' || bio.length > 160) return res.status(400).json({ message: 'เลือกการแสดงโปรไฟล์ ระดับ 2.0–5.0 หรือยังไม่ระบุ และแนะนำตัวไม่เกิน 160 ตัวอักษร' });
+    const settings = profileSettings(req.body);
+    if (!settings) return res.status(400).json({ message: 'เลือกการแสดงโปรไฟล์ ระดับ 2.0–5.0 หรือยังไม่ระบุ และแนะนำตัวไม่เกิน 160 ตัวอักษร' });
     const person = res.locals.line as LineIdentity;
-    const profile = await store.update(data => updateProfile(data, person, { discoverable, skill, bio: bio.trim() }));
+    const profile = await store.update(data => updateProfile(data, person, settings));
     await store.audit({ actorType: 'line', actorId: person.sub, action: 'profile.updated', entityType: 'player', entityId: `line:${person.sub}` });
     return res.json({ profile });
   }));

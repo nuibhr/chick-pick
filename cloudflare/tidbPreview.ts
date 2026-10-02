@@ -1,6 +1,7 @@
 import type { Booking, MemberProfile, Session } from '../src/marketplaceTypes';
 import { coaches } from '../server/coachCatalog';
 import { TidbDocuments } from './tidbDocuments';
+import { ownProfile, profileSettings, updateProfile } from '../server/playerProfiles';
 
 type Env = {
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -33,6 +34,7 @@ function safeLinePicture(value: unknown): string | null {
 }
 
 type LineIdentity = { sub: string; name: string; picture: string | null };
+class ProfileCooldown extends Error {}
 
 export async function verifyLineIdToken(rawToken: string, channelId: string, requestFetch: typeof fetch = fetch): Promise<LineIdentity> {
   const response = await requestFetch('https://api.line.me/oauth2/v2.1/verify', {
@@ -88,19 +90,54 @@ export function publicSession(session: Session, bookings: Booking[], profiles: M
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    // A private document was accidentally placed in public/brand; never serve it.
+    if (pathname === '/brand/messageImage_1790922360771.jpg') return new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
     if (!pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
+    if (pathname === '/api/player/me/profile' && request.method === 'POST') {
+      if (request.headers.has('Origin') && request.headers.get('Origin') !== new URL(request.url).origin) return json({ message: 'กรุณาบันทึกจากหน้าแอปโดยตรง' }, 403);
+      const identity = await playerIdentity(request, env.LINE_CHANNEL_ID);
+      if (identity instanceof Response) return identity;
+      if (!env.TIDB_DATABASE_URL) return json({ message: 'ระบบบันทึกโปรไฟล์ยังไม่พร้อม' }, 503);
+      if (!/^application\/json(?:;|$)/i.test(request.headers.get('Content-Type') || '')) return json({ message: 'ส่งข้อมูลโปรไฟล์เป็น JSON' }, 415);
+      const reader = request.body?.getReader();
+      let size = 0, raw = '';
+      const decoder = new TextDecoder();
+      try {
+        if (reader) while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          size += chunk.value.byteLength;
+          if (size > 4096) { await reader.cancel(); return json({ message: 'ข้อมูลโปรไฟล์ยาวเกินไป' }, 413); }
+          raw += decoder.decode(chunk.value, { stream: true });
+        }
+        raw += decoder.decode();
+        let value: unknown;
+        try { value = JSON.parse(raw); } catch { return json({ message: 'ข้อมูลโปรไฟล์ไม่ถูกต้อง' }, 400); }
+        const settings = profileSettings(value);
+        if (!settings) return json({ message: 'เลือกระดับ 2.0–5.0 หรือยังไม่ระบุ และแนะนำตัวไม่เกิน 160 ตัวอักษร' }, 400);
+        const profile = await new TidbDocuments(env.TIDB_DATABASE_URL).updateMarketplace(data => {
+          const saved = data.profiles?.find(item => item.playerId === `line:${identity.sub}`);
+          if (saved && Date.now() - Date.parse(saved.updatedAt) < 2000) throw new ProfileCooldown();
+          return updateProfile(data, identity, settings);
+        }, { actorId: identity.sub, action: 'profile.updated', entityId: `line:${identity.sub}` });
+        return json({ profile });
+      } catch (error) {
+        if (error instanceof ProfileCooldown) return json({ message: 'เพิ่งบันทึกไป กรุณารอสักครู่แล้วลองใหม่' }, 429);
+        return json({ message: 'บันทึกโปรไฟล์ไม่สำเร็จ กรุณาลองใหม่ ข้อมูลที่กรอกยังอยู่' }, 503);
+      }
+    }
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return json({ message: 'ระบบนี้กำลังทดสอบการอ่านข้อมูลจาก TiDB ยังไม่เปิดรับจองหรือสลิป' }, 503);
     }
     if (pathname === '/api/player/config') {
-      return json({ liffId: env.VITE_LIFF_ID || null, connected: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), bookingEnabled: false });
+      return json({ liffId: env.VITE_LIFF_ID || null, connected: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), profileEditingEnabled: Boolean(env.TIDB_DATABASE_URL && env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), bookingEnabled: false });
     }
     if (pathname === '/api/coach-catalog') {
       return json({ coaches, slots: [], bookingEnabled: false, demo: true });
     }
     if (pathname === '/api/player/sessions' || pathname === '/api/health' ||
       pathname === '/api/player/me' || pathname === '/api/player/bookings') {
-      if (!env.TIDB_DATABASE_URL) return json({ status: 'unavailable', mode: 'tidb-readonly-preview', database: 'not-configured' }, 503);
+      if (!env.TIDB_DATABASE_URL) return json({ status: 'unavailable', mode: 'tidb-profile-preview', database: 'not-configured' }, 503);
       let identity: LineIdentity | undefined;
       if (pathname === '/api/player/me' || pathname === '/api/player/bookings') {
         const result = await playerIdentity(request, env.LINE_CHANNEL_ID);
@@ -110,16 +147,12 @@ export default {
       try {
         const data = await new TidbDocuments(env.TIDB_DATABASE_URL).readMarketplace();
         if (pathname === '/api/health') return json({
-          status: 'ok', mode: 'tidb-readonly-preview', database: 'tidb',
+          status: 'ok', mode: 'tidb-profile-preview', database: 'tidb',
           lineConfigured: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID),
           ocrConfigured: false, receiptStorageConfigured: Boolean(env.RECEIPTS),
         });
         if (pathname === '/api/player/me' && identity) {
-          const saved = data.profiles?.find(profile => profile.playerId === `line:${identity.sub}`);
-          return json({ name: identity.name, profile: {
-            id: saved?.id || '', name: identity.name, picture: identity.picture,
-            skill: saved?.skill ?? null, bio: saved?.bio || '', discoverable: saved?.discoverable === true,
-          } });
+          return json({ name: identity.name, profile: ownProfile(data, identity) });
         }
         if (pathname === '/api/player/bookings' && identity) {
           const bookings = data.bookings.filter(booking => booking.playerId === `line:${identity.sub}`).map(booking => {

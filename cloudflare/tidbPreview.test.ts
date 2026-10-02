@@ -2,6 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import worker, { publicSession, verifyLineIdToken } from './tidbPreview';
 import type { Booking, MemberProfile, Session } from '../src/marketplaceTypes';
+import { TidbDocuments } from './tidbDocuments';
+
+test('private document path cannot be served by public asset binding', async () => {
+  const response = await worker.fetch(new Request('https://example.com/brand/messageImage_1790922360771.jpg'), {
+    ASSETS: { fetch: async () => { throw Error('must not serve private asset'); } },
+  });
+  assert.equal(response.status, 404);
+});
 
 test('Workers public catalog only shows opted-in admitted players before the game', () => {
   const session: Session = {
@@ -46,4 +54,63 @@ test('private player endpoint stays closed without LINE configuration', async ()
     ASSETS: { fetch: async () => new Response('unused') }, TIDB_DATABASE_URL: 'unused',
   });
   assert.equal(response.status, 503);
+});
+
+test('logged-in player can save profile on Worker without enabling bookings', async t => {
+  const data = { sessions: [], bookings: [], profiles: [] as MemberProfile[] };
+  t.mock.method(globalThis, 'fetch', async () => Response.json({
+    iss: 'https://access.line.me', aud: 'configured-channel', sub: 'user-1',
+    exp: Math.floor(Date.now() / 1000) + 60, name: 'Verified Member',
+    picture: 'https://profile.line-scdn.net/avatar.jpg',
+  }));
+  t.mock.method(TidbDocuments.prototype, 'updateMarketplace', async (mutate: (value: typeof data) => unknown) => mutate(data));
+  const env = {
+    ASSETS: { fetch: async () => new Response('unused') },
+    TIDB_DATABASE_URL: 'mysql://fixture:fixture@gateway01.ap-southeast-1.prod.aws.tidbcloud.com/test',
+    LINE_CHANNEL_ID: 'configured-channel',
+  };
+  const response = await worker.fetch(new Request('https://example.com/api/player/me/profile', {
+    method: 'POST', headers: { Authorization: 'Bearer test-line-id-token-for-profile', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skill: 3.2, bio: 'เจอกันที่สนาม', discoverable: true, name: 'Spoofed', playerId: 'line:another-user' }),
+  }), env);
+  assert.equal(response.status, 200, 'profile save must work after LINE login');
+  const result = await response.json() as { profile: MemberProfile };
+  assert.equal(result.profile.name, 'Verified Member');
+  assert.equal(result.profile.skill, 3.2);
+  assert.equal(data.profiles.length, 1);
+  assert.equal(data.profiles[0].playerId, 'line:user-1');
+  assert.equal(result.profile.playerId, undefined, 'internal identity is not returned to the client');
+  const booking = await worker.fetch(new Request('https://example.com/api/player/bookings', { method: 'POST' }), env);
+  assert.equal(booking.status, 503);
+});
+
+test('Worker profile writes require LINE identity and reject foreign origins', async () => {
+  const env = { ASSETS: { fetch: async () => new Response('unused') }, LINE_CHANNEL_ID: 'configured-channel', TIDB_DATABASE_URL: 'unused' };
+  const anonymous = await worker.fetch(new Request('https://example.com/api/player/me/profile', { method: 'POST' }), env);
+  assert.equal(anonymous.status, 401);
+  const foreign = await worker.fetch(new Request('https://example.com/api/player/me/profile', {
+    method: 'POST', headers: { Origin: 'https://foreign.example' },
+  }), env);
+  assert.equal(foreign.status, 403);
+});
+
+test('Worker rejects malformed or oversized profile updates before database mutation', async t => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({
+    iss: 'https://access.line.me', aud: 'configured-channel', sub: 'user-1', exp: Math.floor(Date.now() / 1000) + 60,
+  }));
+  const mutations = t.mock.method(TidbDocuments.prototype, 'updateMarketplace', () => { throw Error('Must not write invalid input'); });
+  const env = { ASSETS: { fetch: async () => new Response('unused') }, LINE_CHANNEL_ID: 'configured-channel', TIDB_DATABASE_URL: 'unused' };
+  for (const [body, expected] of [
+    ['{', 400], ['null', 400],
+    [JSON.stringify({ discoverable: true, skill: 5.1, bio: '' }), 400],
+    [JSON.stringify({ discoverable: true, skill: 3.25, bio: '' }), 400],
+    [JSON.stringify({ discoverable: true, skill: null, bio: 'x'.repeat(161) }), 400],
+    ['x'.repeat(4097), 413],
+  ] as const) {
+    const response = await worker.fetch(new Request('https://example.com/api/player/me/profile', {
+      method: 'POST', headers: { Authorization: 'Bearer test-line-id-token-for-profile', 'Content-Type': 'application/json' }, body,
+    }), env);
+    assert.equal(response.status, expected);
+  }
+  assert.equal(mutations.mock.callCount(), 0);
 });

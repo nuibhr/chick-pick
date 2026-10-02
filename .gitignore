@@ -6,6 +6,7 @@ dist/
 dist-client/
 .wrangler/
 coverage/
+artifacts/
 .DS_Store
 *.log
 .env*

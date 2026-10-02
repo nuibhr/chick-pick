@@ -1,25 +1,21 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight, ArrowUpRight, CalendarCheck, CalendarDays, Check, ChevronRight,
   CircleDot, Clock3, Compass, Info, LockKeyhole, MapPin, MapPinned, Search,
-  ShieldCheck, SlidersHorizontal, Sparkles, Ticket, UserRound, UsersRound, X, GraduationCap,
+  ShieldCheck, SlidersHorizontal, Sparkles, Ticket, UserRound, UsersRound, X, GraduationCap, Moon, Sun,
 } from 'lucide-react';
 import type { PublicSession, PublicParticipant, PlayerProfile, TransferAccount, SlipOcr } from './marketplaceTypes';
 import { ParticipantDialog, ParticipantPreview, PlayerAvatar, PlayerDialog, ProfileEditor } from './PlayerParticipants';
 import CoachPreview from './CoachPreview';
+import PlayerHero from './PlayerHero';
+import { PlayerThemeSettings, usePlayerTheme } from './PlayerTheme';
+import { playStyles, sessionPlayStyle, type PlayStyle } from './playerPresentation';
 import './player-app.css';
 
 type BookingView = { transferAccount: TransferAccount | null; id: string; sessionId: string; amount: number; title: string; createdAt: string; paidAt: string | null; admissionStatus: 'pending' | 'approved'; cancelledAt: string | null; receipt: { id: string; status: 'pending' | 'approved' | 'rejected'; ocr: SlipOcr; rejectReason: string | null } | null };
 type PlayerTab = 'discover' | 'courts' | 'coaches' | 'tickets' | 'profile';
-type GameFilter = 'all' | 'beginner' | 'social' | 'competitive';
-type PlayerConfig = { liffId: string | null; connected: boolean; bookingEnabled: boolean };
+type PlayerConfig = { liffId: string | null; connected: boolean; bookingEnabled: boolean; profileEditingEnabled?: boolean };
 const baht = (n: number) => new Intl.NumberFormat('th-TH', { maximumFractionDigits: 2 }).format(n);
-const filters: { id: GameFilter; label: string }[] = [
-  { id: 'all', label: 'ทั้งหมด' },
-  { id: 'beginner', label: 'มือใหม่' },
-  { id: 'social', label: 'ตีชิลล์' },
-  { id: 'competitive', label: 'เกมเข้ม' },
-];
 
 async function api<T>(route: string, init?: RequestInit): Promise<T> {
   const response = await fetch('/api/player' + route, init);
@@ -28,13 +24,6 @@ async function api<T>(route: string, init?: RequestInit): Promise<T> {
   return value as T;
 }
 
-function matchesFilter(session: PublicSession, filter: GameFilter) {
-  if (filter === 'all') return true;
-  const text = [session.title, session.dupr, session.vibe, ...session.tags].join(' ').toLowerCase();
-  if (filter === 'beginner') return /มือใหม่|เริ่มต้น|beginner/.test(text);
-  if (filter === 'social') return /ชิลล์|สบาย|เพื่อน|social/.test(text);
-  return /เข้ม|จริงจัง|competitive/.test(text);
-}
 
 function CourtArt({ variant = 0 }: { variant?: number }) {
   return <span className={'pa-court-art pa-tone-' + variant % 3} aria-hidden="true">
@@ -63,8 +52,17 @@ export default function PlayerApp() {
   const [person, setPerson] = useState('');
   const [profile, setProfile] = useState<PlayerProfile | null>(null);
   const [config, setConfig] = useState<PlayerConfig>({ liffId: null, connected: false, bookingEnabled: false });
-  const [tab, setTab] = useState<PlayerTab>('discover');
-  const [filter, setFilter] = useState<GameFilter>('all');
+  const [tab, setTab] = useState<PlayerTab>(() => {
+    const saved = location.hash.replace('#view-', '');
+    return ['discover', 'courts', 'coaches', 'tickets', 'profile'].includes(saved) ? saved as PlayerTab : 'discover';
+  });
+  const [filter, setFilter] = useState<PlayStyle | null>(null);
+  const positions = useRef<Partial<Record<PlayerTab, number>>>({});
+  useLayoutEffect(() => {
+    window.scrollTo({ top: positions.current[tab] || 0, behavior: 'instant' });
+  }, [tab]);
+  const { theme, preference, choose } = usePlayerTheme();
+  const canEditProfile = config.profileEditingEnabled ?? config.bookingEnabled;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = sessions.find(session => session.id === selectedId) || null;
   const [participantId, setParticipantId] = useState<string | null>(null);
@@ -94,7 +92,7 @@ export default function PlayerApp() {
           await liff.init({ liffId: settings.liffId });
           if (!active || !liff.isLoggedIn()) return;
           const idToken = liff.getIDToken();
-          if (!idToken) return;
+          if (!idToken) throw Error('ยังไม่ได้รับสิทธิ์ยืนยันตัวตน กรุณาปิดแล้วเปิด MINI App ใหม่');
           const headers = { Authorization: 'Bearer ' + idToken };
           const [me, own] = await Promise.all([
             api<{ name: string; profile: PlayerProfile }>('/me', { headers }),
@@ -119,24 +117,34 @@ export default function PlayerApp() {
   }, []);
 
   const saveProfile = async (value: PlayerProfile) => {
-    if (!token || busy) return;
+    if (!token || busy || !canEditProfile) return;
     setBusy(true); setError('');
     try {
       const result = await api<{ profile: PlayerProfile }>('/me/profile', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify({ discoverable: value.discoverable, skill: value.skill, bio: value.bio }) });
       setProfile(result.profile);
-      const catalog = await api<{ sessions: PublicSession[] }>('/sessions'); setSessions(catalog.sessions);
       setNotice(result.profile.discoverable ? 'บันทึกแล้ว เพื่อนเห็นโปรไฟล์หลังผู้จัดรับเข้าสนาม' : 'บันทึกแล้ว ซ่อนโปรไฟล์จากหน้าก๊วน');
+      void api<{ sessions: PublicSession[] }>('/sessions').then(catalog => setSessions(catalog.sessions)).catch(() => {});
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   };
 
   const login = async () => {
-    if (!config.liffId) return;
+    if (!config.liffId || busy) return;
+    setBusy(true); setError('');
     try {
       const { default: liff } = await import('@line/liff');
       await liff.init({ liffId: config.liffId });
-      if (!liff.isLoggedIn()) liff.login({ redirectUri: location.href });
+      if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }
+      const idToken = liff.getIDToken();
+      if (!idToken) throw Error('ยังไม่ได้รับสิทธิ์ยืนยันตัวตน กรุณาปิดแล้วเปิด MINI App ใหม่');
+      const headers = { Authorization: 'Bearer ' + idToken };
+      const [me, own] = await Promise.all([
+        api<{ name: string; profile: PlayerProfile }>('/me', { headers }),
+        api<{ bookings: BookingView[] }>('/bookings', { headers }),
+      ]);
+      setToken(idToken); setPerson(me.name); setProfile(me.profile); setBookings(own.bookings);
     } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
   };
 
   const reserve = async () => {
@@ -187,26 +195,30 @@ export default function PlayerApp() {
 
   const available = useMemo(() => sessions
     .filter(session => session.status !== 'completed')
-    .filter(session => matchesFilter(session, filter))
+    .filter(session => !filter || sessionPlayStyle(session) === filter)
     .filter(session => (session.title + ' ' + session.venue + ' ' + session.area).toLowerCase().includes(query.toLowerCase()))
     .sort((a, b) => Date.parse(a.startsAt) - Date.parse(b.startsAt)), [sessions, filter, query]);
   const upcoming = sessions.filter(session => session.status !== 'completed');
   const openSeats = upcoming.reduce((sum, session) => sum + Math.max(0, session.capacity - session.joined), 0);
   const venues = [...new Map(upcoming.map(session => [session.venue, session])).values()];
-  const navigate = (next: PlayerTab) => { setTab(next); setError(''); window.scrollTo({ top: 0, behavior: 'instant' }); };
-  const showVenue = (venue: string) => { setFilter('all'); setQuery(venue); navigate('discover'); };
+  const navigate = (next: PlayerTab) => {
+    positions.current[tab] = window.scrollY;
+    setTab(next); setError('');
+    history.replaceState(null, '', location.pathname + location.search + '#view-' + next);
+  };
+  const showVenue = (venue: string) => { setFilter(null); setQuery(venue); navigate('discover'); };
 
-  return <div className="player-app">
+  return <div className="player-app" data-theme={theme}>
     <a className="pa-skip" href="#player-content">ข้ามไปเนื้อหา</a>
     <header className="pa-header">
       <button className="pa-brand" type="button" onClick={() => navigate('discover')} aria-label="ไปหน้าแรก Chick&Pick">
         <span className="pa-brand-icon"><img src="/brand/chick-pick-mark.png" alt="" /></span>
         <span className="pa-brand-name">Chick<span>&</span>Pick<small>PLAY GOOD. FEEL GOOD.</small></span>
       </button>
-      <button className="pa-header-action" type="button" onClick={() => navigate('tickets')} aria-label="ดูการจองของฉัน">
+      <div className="pa-header-actions"><button className="pa-header-action" type="button" onClick={() => navigate('profile')} aria-label="ตั้งค่าธีมหน้าจอ">{theme === 'dark' ? <Moon size={19} /> : <Sun size={19} />}</button><button className="pa-header-action" type="button" onClick={() => navigate('tickets')} aria-label="ดูการจองของฉัน">
         <Ticket size={20} />
         {bookings.length > 0 && <i aria-hidden="true" />}
-      </button>
+      </button></div>
     </header>
     <main className="pa-main" id="player-content">
       {notice && <p className="pa-message pa-success" role="status"><Check size={17} />{notice}</p>}
@@ -217,23 +229,20 @@ export default function PlayerApp() {
           <span className="pa-location"><MapPin size={14} />ขอนแก่น <ChevronRight size={13} /></span>
           <div className="pa-heading-row"><div><small>YOUR COURT STARTS HERE</small><h1>มาเล่นกัน<span>.</span></h1><p>ก๊วนดี ๆ เพื่อนใหม่ ๆ รออยู่ที่สนาม</p></div><span className="pa-welcome-icon"><Sparkles size={23} /></span></div>
         </div>
-        <section className="pa-hero" aria-label="ค้นหาก๊วน Chick&Pick">
-          <div className="pa-hero-text"><span className="pa-hero-kicker"><span />THE GAME IS ON</span><h2>มาคนเดียว<br /><em>กลับไปมีก๊วน</em></h2><p>เลือกเกมที่ใช่ แล้วเจอกันในคอร์ท</p><button type="button" onClick={() => document.getElementById('open-games')?.scrollIntoView({ behavior: 'smooth' })}>ดูก๊วนที่เปิดรับ <ArrowRight size={17} /></button></div>
-          <div className="pa-hero-orbit" aria-hidden="true"><span /><i /></div>
-          <img src="/chicken-court-3d.webp" alt="" />
-          <span className="pa-hero-bottom" aria-hidden="true">GOOD PEOPLE · GREAT GAMES</span>
-        </section>
+        <PlayerHero viewGames={() => document.getElementById('open-games')?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })} />
         <div className="pa-pulse"><span><span className="pa-pulse-icon"><CalendarCheck size={18} /></span><b>{upcoming.length}<small>ก๊วนที่เปิดรับ</small></b></span><i /><span><span className="pa-pulse-icon"><UsersRound size={18} /></span><b>{openSeats}<small>ที่ว่างทั้งหมด</small></b></span></div>
         <div className="pa-section-heading" id="open-games"><div><span>FIND YOUR GAME</span><h2>หาก๊วนที่ใช่</h2></div><span className="pa-count">{available.length} ก๊วน</span></div>
         <label className="pa-search"><Search size={19} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="ค้นหาก๊วนหรือสนาม" aria-label="ค้นหาก๊วนหรือสนาม" />{query && <button type="button" onClick={() => setQuery('')} aria-label="ล้างคำค้นหา"><X size={16} /></button>}</label>
         <div className="pa-filter-heading"><span><SlidersHorizontal size={15} /> เลือกสไตล์การเล่น</span></div>
-        <div className="pa-filters" role="group" aria-label="ตัวกรองสไตล์ก๊วน">{filters.map(option => <button type="button" key={option.id} className={filter === option.id ? 'active' : ''} aria-pressed={filter === option.id} onClick={() => setFilter(option.id)}>{option.label}</button>)}</div>
-        {loading ? <div className="pa-loading" role="status"><span /><span /><span /></div> : available.length ? <div className="pa-game-list">{available.map((session, index) => <SessionCard key={session.id} session={session} index={index} open={() => setSelectedId(session.id)} openProfile={person => setParticipantId(person.id)} />)}</div> : <div className="pa-empty"><Compass size={28} /><b>ยังไม่เจอก๊วนที่ตรงใจ</b><p>ลองเปลี่ยนคำค้นหาหรือตัวกรองดูนะ</p><button type="button" onClick={() => { setQuery(''); setFilter('all'); }}>ดูก๊วนทั้งหมด <ArrowRight size={15} /></button></div>}
+        <div className="pa-filters" role="group" aria-label="ตัวกรองสไตล์ก๊วน">{playStyles.map(option => <button type="button" key={option.id} className={filter === option.id ? 'active' : ''} aria-label={`สไตล์ ${option.label} · ${option.description}`} aria-pressed={filter === option.id} onClick={() => setFilter(filter === option.id ? null : option.id)}><img src={option.image} alt="" width="1122" height="1402" loading="lazy" /><span className="pa-style-caption"><span>{option.label}</span><small>{option.description}</small></span><i className="pa-style-selected" aria-hidden="true"><Check size={16} /></i></button>)}</div>
+        <p className="pa-filter-note">{filter ? 'แตะระดับที่เลือกอีกครั้งเพื่อดูทุกก๊วน' : 'แสดงทุกระดับ · เลือกระดับที่อยากเล่น'}</p>
+        {loading ? <div className="pa-loading" role="status"><span /><span /><span /></div> : available.length ? <div className="pa-game-list">{available.map((session, index) => <SessionCard key={session.id} session={session} index={index} open={() => setSelectedId(session.id)} openProfile={person => setParticipantId(person.id)} />)}</div> : <div className="pa-empty"><Compass size={28} /><b>ยังไม่เจอก๊วนที่ตรงใจ</b><p>ลองเปลี่ยนคำค้นหาหรือตัวกรองดูนะ</p><button type="button" onClick={() => { setQuery(''); setFilter(null); }}>ดูก๊วนทั้งหมด <ArrowRight size={15} /></button></div>}
         <div className="pa-integrity"><ShieldCheck size={18} /><span>การจองในแอปยังเป็นโหมดทดลอง ไม่มีการเรียกเก็บเงินจริง</span></div>
       </>}
 
       {tab === 'courts' && <>
         <div className="pa-page-intro"><span>PLACES TO PLAY</span><h1>สนามของเรา<span>.</span></h1><p>เลือกสนาม แล้วดูว่ามีก๊วนไหนกำลังเปิดรับ</p></div>
+        <figure className="pa-court-cover"><img src="/categories/court-club.jpg" alt="ภาพกราฟิก Pickly Club พร้อมไม้และลูกพิคเคิลบอล" width="1536" height="1024" /><figcaption><span>COURT COMMUNITY</span><strong>ที่เล่นประจำ เพื่อนกลุ่มใหม่</strong><small>ค้นหาสนามจากก๊วนที่กำลังเปิดรับด้านล่าง</small></figcaption></figure>
         <div className="pa-court-list">{venues.length ? venues.map((session, index) => {
           const count = upcoming.filter(item => item.venue === session.venue).length;
           return <button type="button" className="pa-venue-card" key={session.venue} onClick={() => showVenue(session.venue)}><CourtArt variant={index} /><span><small><MapPinned size={13} />{session.area}</small><strong>{session.venue}</strong><em>{count} ก๊วนที่เปิดรับ</em></span><span className="pa-venue-arrow"><ArrowUpRight size={20} /></span></button>;
@@ -253,7 +262,8 @@ export default function PlayerApp() {
       {tab === 'profile' && <>
         <div className="pa-page-intro"><span>YOUR PLAYER SPACE</span><h1>สวัสดี นักเล่น<span>.</span></h1><p>ทุกเกมที่ดี เริ่มจากเพื่อนร่วมคอร์ท</p></div>
         <section className="pa-profile-card"><div className="pa-profile-mark">{profile ? <PlayerAvatar person={profile} large /> : <UserRound size={32} />}</div><span className="pa-profile-state">{person ? <><Check size={13} /> เชื่อม LINE แล้ว</> : 'PLAYER PROFILE'}</span><h2>{person || 'ผู้เล่นคนใหม่'}</h2><p>{person ? 'พร้อมเจอกันที่สนาม' : 'เชื่อม LINE เพื่อเก็บการจองไว้กับบัญชีของคุณ'}</p>{config.connected && !token && <button type="button" onClick={login}>เชื่อมบัญชี LINE <ArrowRight size={16} /></button>}</section>
-        {profile && <ProfileEditor profile={profile} busy={busy || !config.bookingEnabled} save={saveProfile} />}
+        {profile && <ProfileEditor profile={profile} busy={busy} enabled={canEditProfile} save={saveProfile} />}
+        <PlayerThemeSettings preference={preference} choose={choose} />
         <div className="pa-profile-stats"><span><b>{bookings.length}</b><small>ก๊วนที่จอง</small></span><span><b>{bookings.filter(booking => booking.paidAt).length}</b><small>ยืนยันรับเงิน</small></span></div>
         <section className="pa-profile-guide"><h2>เริ่มเล่นง่าย ๆ</h2><div><span>01</span><p><b>เลือกก๊วน</b><small>ดูสนาม เวลา และระดับที่เหมาะกับคุณ</small></p></div><div><span>02</span><p><b>จองผ่าน LINE</b><small>ใช้บัญชีของคุณเพื่อเก็บรายการจอง</small></p></div><div><span>03</span><p><b>เจอกันที่สนาม</b><small>ตรวจรายละเอียดกับผู้จัดก่อนเดินทาง</small></p></div></section>
         <div className="pa-integrity"><ShieldCheck size={18} /><span>ระบบจองและยอดเงินยังอยู่ในโหมดทดลอง</span></div>
@@ -265,9 +275,9 @@ export default function PlayerApp() {
       ['coaches', GraduationCap, 'โค้ช'],
       ['tickets', Ticket, 'การจอง'],
       ['profile', UserRound, 'โปรไฟล์'],
-    ] as const).map(([id, Icon, label]) => <button type="button" key={id} className={tab === id ? 'active' : ''} aria-current={tab === id ? 'page' : undefined} onClick={() => navigate(id)}><span className="pa-nav-icon"><Icon size={21} strokeWidth={tab === id ? 2.4 : 1.9} /></span><span>{label}</span></button>)}</nav>
+    ] as const).map(([id, Icon, label]) => <a href={'#view-' + id} key={id} className={tab === id ? 'active' : ''} aria-current={tab === id ? 'page' : undefined} onClick={event => { event.preventDefault(); navigate(id); }}><span className="pa-nav-icon"><Icon size={21} strokeWidth={tab === id ? 2.4 : 1.9} />{id === 'tickets' && bookings.some(booking => !booking.cancelledAt && booking.admissionStatus !== 'approved') && <span className="pa-nav-badge" aria-label="มีการจองรอยืนยัน">{bookings.filter(booking => !booking.cancelledAt && booking.admissionStatus !== 'approved').length}</span>}</span><span>{label}</span></a>)}</nav>
 
-    {selected && <PlayerDialog label="รายละเอียดก๊วน" close={() => { setParticipantId(null); setSelectedId(null); }}><div className="pa-modal-art"><CourtArt /><img src="/chicken-court-3d.webp" alt="" /></div><span className="pa-modal-eyebrow"><Sparkles size={14} /> YOUR NEXT GOOD GAME</span><h2>{selected.title}</h2><p className="pa-modal-place"><MapPin size={16} />{selected.venue} · {selected.area}</p><div className="pa-modal-facts"><span><CalendarDays size={18} /><b>{selected.date}</b><small>{selected.time}</small></span><span><UsersRound size={18} /><b>{selected.joined}/{selected.capacity}</b><small>จองแล้ว</small></span><span><CircleDot size={18} /><b>{selected.courtCount} คอร์ท</b><small>{selected.dupr}</small></span></div><ParticipantPreview session={selected} full openProfile={person => setParticipantId(person.id)} /><div className="pa-modal-host"><span><UserRound size={17} /></span><div><small>ดูแลก๊วนโดย</small><b>{selected.host}</b></div><em>{selected.vibe}</em></div>{profile && <label className="pa-visibility pa-join-visibility"><input type="checkbox" role="switch" checked={profile.discoverable} disabled={busy || !config.bookingEnabled} onChange={event => void saveProfile({ ...profile, discoverable: event.target.checked })} /><span><b>แสดงโปรไฟล์ของฉันเมื่อผู้จัดรับเข้าสนาม</b><small>ชื่อ รูป ระดับ และคำแนะนำตัวจะแสดงหลังผู้จัดรับเข้าสนาม ปิดได้ทุกเมื่อที่หน้าโปรไฟล์</small></span></label>}{error && <p className="pa-message pa-error" role="alert">{error}</p>}<div className="pa-modal-foot"><div><small>ค่าร่วมก๊วน / คน</small><strong>฿{baht(selected.price)}</strong></div>{!config.bookingEnabled ? <button type="button" disabled>ยังไม่เปิดจองผ่าน LINE</button> : token ? <button type="button" disabled={busy || selected.status !== 'open'} onClick={reserve}>{busy ? 'กำลังบันทึก…' : selected.status === 'full' ? 'ก๊วนเต็มแล้ว' : 'จองทดลอง'}<ArrowRight size={17} /></button> : <button type="button" onClick={login}>เชื่อม LINE ก่อนจอง <ArrowRight size={16} /></button>}</div><p className="pa-modal-note"><Info size={13} />ยังไม่มีการเรียกเก็บเงินจริง</p></PlayerDialog>}
+    {selected && <PlayerDialog label="รายละเอียดก๊วน" close={() => { setParticipantId(null); setSelectedId(null); }}><div className="pa-modal-art"><CourtArt /><img src="/chicken-court-3d.webp" alt="" /></div><span className="pa-modal-eyebrow"><Sparkles size={14} /> YOUR NEXT GOOD GAME</span><h2>{selected.title}</h2><p className="pa-modal-place"><MapPin size={16} />{selected.venue} · {selected.area}</p><div className="pa-modal-facts"><span><CalendarDays size={18} /><b>{selected.date}</b><small>{selected.time}</small></span><span><UsersRound size={18} /><b>{selected.joined}/{selected.capacity}</b><small>จองแล้ว</small></span><span><CircleDot size={18} /><b>{selected.courtCount} คอร์ท</b><small>{selected.dupr}</small></span></div><ParticipantPreview session={selected} full openProfile={person => setParticipantId(person.id)} /><div className="pa-modal-host"><span><UserRound size={17} /></span><div><small>ดูแลก๊วนโดย</small><b>{selected.host}</b></div><em>{selected.vibe}</em></div>{profile && <label className="pa-visibility pa-join-visibility"><input type="checkbox" role="switch" checked={profile.discoverable} disabled={busy || !canEditProfile} onChange={event => void saveProfile({ ...profile, discoverable: event.target.checked })} /><span><b>แสดงโปรไฟล์ของฉันเมื่อผู้จัดรับเข้าสนาม</b><small>ชื่อ รูป ระดับ และคำแนะนำตัวจะแสดงหลังผู้จัดรับเข้าสนาม ปิดได้ทุกเมื่อที่หน้าโปรไฟล์</small></span></label>}{error && <p className="pa-message pa-error" role="alert">{error}</p>}<div className="pa-modal-foot"><div><small>ค่าร่วมก๊วน / คน</small><strong>฿{baht(selected.price)}</strong></div>{!config.bookingEnabled ? <button type="button" disabled>ยังไม่เปิดจองผ่าน LINE</button> : token ? <button type="button" disabled={busy || selected.status !== 'open'} onClick={reserve}>{busy ? 'กำลังบันทึก…' : selected.status === 'full' ? 'ก๊วนเต็มแล้ว' : 'จองทดลอง'}<ArrowRight size={17} /></button> : <button type="button" onClick={login}>เชื่อม LINE ก่อนจอง <ArrowRight size={16} /></button>}</div><p className="pa-modal-note"><Info size={13} />ยังไม่มีการเรียกเก็บเงินจริง</p></PlayerDialog>}
     {participant && <ParticipantDialog person={participant} close={closeParticipant} />}
   </div>;
 }

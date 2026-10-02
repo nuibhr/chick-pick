@@ -1,6 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "chick-pick-tidb-staging",
+  "preview_urls": false,
   "main": "cloudflare/tidbPreview.ts",
   "compatibility_date": "2026-10-01",
   "vars": {
@@ -14,6 +15,6 @@
     "directory": "./dist-client",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": ["/api/*", "/brand/messageImage_1790922360771.jpg"]
   }
 }

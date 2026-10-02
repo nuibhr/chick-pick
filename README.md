@@ -37,7 +37,7 @@ npm run build
 
 ## MVP limitations / next priorities
 
-The local development server remains a prototype. A separate Cloudflare staging URL reads public sessions from TiDB, while booking and payment APIs remain disabled there. Bookings and payment confirmations do not charge or transfer real money.
+The local development server remains a prototype. A separate Cloudflare staging URL reads public sessions from TiDB and allows authenticated LINE players to save their own profile, with a transactional audit record. Booking and payment APIs remain disabled there. Bookings and payment confirmations do not charge or transfer real money.
 
 1. Complete real-account mobile testing of the configured LINE MINI App Developing channel and LIFF ID on HTTPS. Configure the Published channel separately before public launch. Add organizer/coach roles and ownership checks; the single local organizer password and coaching demo access are not a production identity system.
 2. Finish the TiDB-backed Workers API for every mutable route and private durable receipt storage; add bank reconciliation, backups and retry handling. Local coaching and DUPR state still use files. Receipt approval stays manual until a verified bank integration exists.
@@ -53,4 +53,4 @@ For an isolated sample without touching `data/`, set `APP_DATA_DIR` to a separat
 
 For a from-scratch hosted pilot plan, see [PRODUCTION-START-HERE.md](PRODUCTION-START-HERE.md). For an HTTPS page to start LINE LIFF identity testing, see [README-HTTPS-LINE-SETUP.md](README-HTTPS-LINE-SETUP.md). Do not expose the current prototype publicly for bookings until its production readiness items are complete.
 
-The Cloudflare Workers Free TiDB read-only staging deployment and remaining live-booking requirements are documented in [README-CLOUDFLARE-FREE.md](README-CLOUDFLARE-FREE.md).
+The Cloudflare Workers Free TiDB profile staging deployment and remaining live-booking requirements are documented in [README-CLOUDFLARE-FREE.md](README-CLOUDFLARE-FREE.md).
