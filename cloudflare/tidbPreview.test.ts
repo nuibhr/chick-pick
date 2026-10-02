@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { publicSession } from './tidbPreview';
+import worker, { publicSession, verifyLineIdToken } from './tidbPreview';
 import type { Booking, MemberProfile, Session } from '../src/marketplaceTypes';
 
 test('Workers public catalog only shows opted-in admitted players before the game', () => {
@@ -28,4 +28,22 @@ test('Workers public catalog only shows opted-in admitted players before the gam
   const completed = publicSession({ ...session, status: 'completed' }, bookings, profiles);
   assert.deepEqual(completed.participants, []);
   assert.equal(completed.privateParticipantCount, 0);
+});
+
+test('LINE token verification binds identity to the configured channel', async () => {
+  const valid = async () => Response.json({
+    iss: 'https://access.line.me', aud: 'configured-channel', sub: 'user-1',
+    exp: Math.floor(Date.now() / 1000) + 60, name: 'Member',
+    picture: 'https://evil.example/avatar.jpg',
+  });
+  const identity = await verifyLineIdToken('token', 'configured-channel', valid as typeof fetch);
+  assert.deepEqual(identity, { sub: 'user-1', name: 'Member', picture: null });
+  await assert.rejects(() => verifyLineIdToken('token', 'different-channel', valid as typeof fetch));
+});
+
+test('private player endpoint stays closed without LINE configuration', async () => {
+  const response = await worker.fetch(new Request('https://example.com/api/player/me'), {
+    ASSETS: { fetch: async () => new Response('unused') }, TIDB_DATABASE_URL: 'unused',
+  });
+  assert.equal(response.status, 503);
 });

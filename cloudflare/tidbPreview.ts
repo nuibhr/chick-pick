@@ -1,11 +1,13 @@
-import { connect } from '@tidbcloud/serverless';
-import type { Booking, MarketplaceData, MemberProfile, Session } from '../src/marketplaceTypes';
+import type { Booking, MemberProfile, Session } from '../src/marketplaceTypes';
 import { coaches } from '../server/coachCatalog';
+import { TidbDocuments } from './tidbDocuments';
 
 type Env = {
   ASSETS: { fetch(request: Request): Promise<Response> };
   TIDB_DATABASE_URL?: string;
   RECEIPTS?: unknown;
+  LINE_CHANNEL_ID?: string;
+  VITE_LIFF_ID?: string;
 };
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -28,6 +30,36 @@ function safeLinePicture(value: unknown): string | null {
     return url.protocol === 'https:' && !url.username && !url.password &&
       (url.hostname === 'line-scdn.net' || url.hostname.endsWith('.line-scdn.net')) ? url.href : null;
   } catch { return null; }
+}
+
+type LineIdentity = { sub: string; name: string; picture: string | null };
+
+export async function verifyLineIdToken(rawToken: string, channelId: string, requestFetch: typeof fetch = fetch): Promise<LineIdentity> {
+  const response = await requestFetch('https://api.line.me/oauth2/v2.1/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ id_token: rawToken, client_id: channelId }),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) throw new Error('LINE identity verification failed');
+  const claims = await response.json() as Record<string, unknown>;
+  if (claims.iss !== 'https://access.line.me' || claims.aud !== channelId ||
+    typeof claims.sub !== 'string' || !claims.sub || typeof claims.exp !== 'number' || claims.exp * 1000 <= Date.now()) {
+    throw new Error('Invalid LINE identity');
+  }
+  return {
+    sub: claims.sub,
+    name: typeof claims.name === 'string' && claims.name.trim() ? claims.name.trim().slice(0, 80) : 'ผู้เล่น LINE',
+    picture: safeLinePicture(claims.picture),
+  };
+}
+
+async function playerIdentity(request: Request, channelId: string | undefined): Promise<LineIdentity | Response> {
+  if (!channelId) return json({ message: 'ยังไม่เชื่อม LINE Mini App' }, 503);
+  const token = request.headers.get('Authorization')?.match(/^Bearer (\S{20,4096})$/)?.[1];
+  if (!token) return json({ message: 'กรุณาเข้าสู่ระบบผ่าน LINE' }, 401);
+  try { return await verifyLineIdToken(token, channelId); }
+  catch { return json({ message: 'ยืนยันตัวตน LINE ไม่สำเร็จ กรุณาเปิดแอปใหม่' }, 401); }
 }
 
 export function publicSession(session: Session, bookings: Booking[], profiles: MemberProfile[] = []) {
@@ -53,16 +85,6 @@ export function publicSession(session: Session, bookings: Booking[], profiles: M
   };
 }
 
-async function readMarketplace(connectionUrl: string): Promise<MarketplaceData> {
-  const database = connect({ url: connectionUrl });
-  const rows = await database.execute('SELECT payload FROM app_documents WHERE document_key = ?', ['marketplace']);
-  if (!Array.isArray(rows) || !rows[0]) throw new Error('Marketplace document is missing');
-  const payload = (rows[0] as Record<string, unknown>).payload;
-  const data = (typeof payload === 'string' ? JSON.parse(payload) : payload) as MarketplaceData;
-  if (!Array.isArray(data.sessions) || !Array.isArray(data.bookings)) throw new Error('Marketplace document is invalid');
-  return data;
-}
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
@@ -71,19 +93,47 @@ export default {
       return json({ message: 'ระบบนี้กำลังทดสอบการอ่านข้อมูลจาก TiDB ยังไม่เปิดรับจองหรือสลิป' }, 503);
     }
     if (pathname === '/api/player/config') {
-      return json({ liffId: null, connected: false, bookingEnabled: false });
+      return json({ liffId: env.VITE_LIFF_ID || null, connected: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), bookingEnabled: false });
     }
     if (pathname === '/api/coach-catalog') {
       return json({ coaches, slots: [], bookingEnabled: false, demo: true });
     }
-    if (pathname === '/api/player/sessions' || pathname === '/api/health') {
+    if (pathname === '/api/player/sessions' || pathname === '/api/health' ||
+      pathname === '/api/player/me' || pathname === '/api/player/bookings') {
       if (!env.TIDB_DATABASE_URL) return json({ status: 'unavailable', mode: 'tidb-readonly-preview', database: 'not-configured' }, 503);
+      let identity: LineIdentity | undefined;
+      if (pathname === '/api/player/me' || pathname === '/api/player/bookings') {
+        const result = await playerIdentity(request, env.LINE_CHANNEL_ID);
+        if (result instanceof Response) return result;
+        identity = result;
+      }
       try {
-        const data = await readMarketplace(env.TIDB_DATABASE_URL);
+        const data = await new TidbDocuments(env.TIDB_DATABASE_URL).readMarketplace();
         if (pathname === '/api/health') return json({
           status: 'ok', mode: 'tidb-readonly-preview', database: 'tidb',
-          lineConfigured: false, ocrConfigured: false, receiptStorageConfigured: Boolean(env.RECEIPTS),
+          lineConfigured: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID),
+          ocrConfigured: false, receiptStorageConfigured: Boolean(env.RECEIPTS),
         });
+        if (pathname === '/api/player/me' && identity) {
+          const saved = data.profiles?.find(profile => profile.playerId === `line:${identity.sub}`);
+          return json({ name: identity.name, profile: {
+            id: saved?.id || '', name: identity.name, picture: identity.picture,
+            skill: saved?.skill ?? null, bio: saved?.bio || '', discoverable: saved?.discoverable === true,
+          } });
+        }
+        if (pathname === '/api/player/bookings' && identity) {
+          const bookings = data.bookings.filter(booking => booking.playerId === `line:${identity.sub}`).map(booking => {
+            const receipt = booking.receipts?.at(-1);
+            return {
+              id: booking.id, sessionId: booking.sessionId, amount: booking.amount, title: booking.title,
+              transferAccount: booking.transferAccount || null, createdAt: booking.createdAt,
+              paidAt: booking.paidAt || null, admissionStatus: booking.admissionStatus || 'pending',
+              cancelledAt: booking.cancelledAt || null,
+              receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, rejectReason: receipt.rejectReason || null } : null,
+            };
+          });
+          return json({ bookings });
+        }
         return json({ sessions: data.sessions.map(session => publicSession(session, data.bookings, data.profiles)) });
       } catch (error) {
         console.error('TiDB read failed', error instanceof Error ? error.name : 'unknown');
