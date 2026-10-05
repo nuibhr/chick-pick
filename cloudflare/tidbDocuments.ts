@@ -1,5 +1,8 @@
 import { connect } from '@tidbcloud/serverless';
 import type { MarketplaceData, TransferAccount } from '../src/marketplaceTypes';
+import type { PilotContext } from './pilotDomain';
+
+export type Audit = { actorId: string; action: string; entityId: string; actorType?: 'admin' | 'line'; entityType?: string };
 
 type Row = Record<string, unknown>;
 
@@ -27,14 +30,20 @@ export class TidbDocuments {
     return data;
   }
 
-  async updateMarketplace<T>(mutate: (data: MarketplaceData) => T | Promise<T>, audit?: { actorId: string; action: string; entityId: string }): Promise<T> {
+  async updateMarketplace<T>(mutate: (data: MarketplaceData, context: PilotContext) => T | Promise<T>, audit?: Audit, pilot = false): Promise<T> {
     const tx = await this.db.begin();
     try {
       const data = document<MarketplaceData>((await tx.execute('SELECT payload FROM app_documents WHERE document_key = ? FOR UPDATE', ['marketplace'])).rows as Row[] | null);
-      const result = await mutate(data);
+      let context: PilotContext = { account: null, enabled: false, closed: [] };
+      if (pilot) {
+        const rows = (await tx.execute('SELECT document_key, payload FROM app_documents WHERE document_key IN (?, ?, ?) ORDER BY document_key FOR UPDATE', ['transfer-account', 'worker-pilot', 'revenue-settlements'])).rows as Row[] | null;
+        const values = new Map((rows || []).map(row => [String(row.document_key), typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload]));
+        context = { account: values.get('transfer-account') || null, enabled: values.get('worker-pilot')?.bookingEnabled === true, closed: (values.get('revenue-settlements') || []).map((row: { key: string }) => row.key) };
+      }
+      const result = await mutate(data, context);
       await tx.execute('UPDATE app_documents SET payload = ?, version = version + 1 WHERE document_key = ?', [JSON.stringify(data), 'marketplace']);
       if (audit) await tx.execute('INSERT INTO audit_events (id, actor_type, actor_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [crypto.randomUUID(), 'line', audit.actorId, audit.action, 'player', audit.entityId, null]);
+        [crypto.randomUUID(), audit.actorType || 'line', audit.actorId, audit.action, audit.entityType || 'player', audit.entityId, null]);
       await tx.commit();
       return result;
     } catch (error) {
@@ -48,13 +57,14 @@ export class TidbDocuments {
     return document<T>(result.rows as Row[] | null, fallback);
   }
 
-  async updateDocument<T, R>(key: string, fallback: T, mutate: (value: T) => R | Promise<R>): Promise<R> {
+  async updateDocument<T, R>(key: string, fallback: T, mutate: (value: T) => R | Promise<R>, audit?: Audit): Promise<R> {
     const tx = await this.db.begin();
     try {
       await tx.execute('INSERT IGNORE INTO app_documents (document_key, payload) VALUES (?, ?)', [key, JSON.stringify(fallback)]);
       const value = document<T>((await tx.execute('SELECT payload FROM app_documents WHERE document_key = ? FOR UPDATE', [key])).rows as Row[] | null);
       const result = await mutate(value);
       await tx.execute('UPDATE app_documents SET payload = ?, version = version + 1 WHERE document_key = ?', [JSON.stringify(value), key]);
+      if (audit) await tx.execute('INSERT INTO audit_events (id, actor_type, actor_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?)', [crypto.randomUUID(), audit.actorType || 'admin', audit.actorId, audit.action, audit.entityType || 'settings', audit.entityId, null]);
       await tx.commit();
       return result;
     } catch (error) {

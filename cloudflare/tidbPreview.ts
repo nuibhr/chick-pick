@@ -2,13 +2,16 @@ import type { Booking, MemberProfile, Session } from '../src/marketplaceTypes';
 import { coaches } from '../server/coachCatalog';
 import { TidbDocuments } from './tidbDocuments';
 import { ownProfile, profileSettings, updateProfile } from '../server/playerProfiles';
+import { pilotRequest, type ReceiptKV } from './pilot';
 
 type Env = {
   ASSETS: { fetch(request: Request): Promise<Response> };
   TIDB_DATABASE_URL?: string;
-  RECEIPTS?: unknown;
+  RECEIPTS?: ReceiptKV;
   LINE_CHANNEL_ID?: string;
   VITE_LIFF_ID?: string;
+  ADMIN_SESSION_SECRET?: string;
+  ADMIN_PAIRING_TOKEN?: string;
 };
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -126,18 +129,17 @@ export default {
         return json({ message: 'บันทึกโปรไฟล์ไม่สำเร็จ กรุณาลองใหม่ ข้อมูลที่กรอกยังอยู่' }, 503);
       }
     }
+    const pilot = await pilotRequest(request, env, verifyLineIdToken);
+    if (pilot) return pilot;
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return json({ message: 'ระบบนี้กำลังทดสอบการอ่านข้อมูลจาก TiDB ยังไม่เปิดรับจองหรือสลิป' }, 503);
-    }
-    if (pathname === '/api/player/config') {
-      return json({ liffId: env.VITE_LIFF_ID || null, connected: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), profileEditingEnabled: Boolean(env.TIDB_DATABASE_URL && env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), bookingEnabled: false });
     }
     if (pathname === '/api/coach-catalog') {
       return json({ coaches, slots: [], bookingEnabled: false, demo: true });
     }
     if (pathname === '/api/player/sessions' || pathname === '/api/health' ||
       pathname === '/api/player/me' || pathname === '/api/player/bookings') {
-      if (!env.TIDB_DATABASE_URL) return json({ status: 'unavailable', mode: 'tidb-profile-preview', database: 'not-configured' }, 503);
+      if (!env.TIDB_DATABASE_URL) return json({ status: 'unavailable', mode: 'tidb-pilot-prepared', database: 'not-configured' }, 503);
       let identity: LineIdentity | undefined;
       if (pathname === '/api/player/me' || pathname === '/api/player/bookings') {
         const result = await playerIdentity(request, env.LINE_CHANNEL_ID);
@@ -147,8 +149,9 @@ export default {
       try {
         const data = await new TidbDocuments(env.TIDB_DATABASE_URL).readMarketplace();
         if (pathname === '/api/health') return json({
-          status: 'ok', mode: 'tidb-profile-preview', database: 'tidb',
+          status: 'ok', mode: 'tidb-pilot-prepared', database: 'tidb',
           lineConfigured: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID),
+          adminConfigured: Boolean(env.ADMIN_SESSION_SECRET && env.ADMIN_PAIRING_TOKEN),
           ocrConfigured: false, receiptStorageConfigured: Boolean(env.RECEIPTS),
         });
         if (pathname === '/api/player/me' && identity) {

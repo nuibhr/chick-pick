@@ -80,7 +80,8 @@ test('logged-in player can save profile on Worker without enabling bookings', as
   assert.equal(data.profiles.length, 1);
   assert.equal(data.profiles[0].playerId, 'line:user-1');
   assert.equal(result.profile.playerId, undefined, 'internal identity is not returned to the client');
-  const booking = await worker.fetch(new Request('https://example.com/api/player/bookings', { method: 'POST' }), env);
+  t.mock.method(TidbDocuments.prototype, 'readDocument', async () => ({}));
+  const booking = await worker.fetch(new Request('https://example.com/api/player/bookings', { method: 'POST', headers: { Authorization: 'Bearer test-line-id-token-for-profile', 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: 'test' }) }), env);
   assert.equal(booking.status, 503);
 });
 

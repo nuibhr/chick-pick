@@ -1,49 +1,53 @@
-# Chick&Pick บน Cloudflare Workers Free
+# Chick&Pick Cloudflare pilot — 5 ตุลาคม 2026
 
-URL สำหรับทดสอบข้อมูล TiDB และโปรไฟล์ LINE: `https://chick-pick-tidb-staging.nuibhr1.workers.dev/miniapp`
+เว็บผู้เล่น: https://chick-pick-tidb-staging.nuibhr1.workers.dev/miniapp
+พื้นที่ผู้จัด: https://chick-pick-tidb-staging.nuibhr1.workers.dev/miniapp?organizer=1
 
-Worker นี้อ่านเอกสาร `marketplace` จาก TiDB ผ่าน TiDB Cloud Serverless HTTP driver. หน้า Mini App, `/api/health`, `/api/player/config`, `/api/player/sessions` และตารางโค้ชตัวอย่างใช้ได้บน HTTPS. ข้อมูลก๊วนมาจาก TiDB เดิม. มี KV namespace `chick-pick-staging-receipts` แยกไว้สำหรับภาพสลิปในรอบทดลอง แต่ยังไม่มี route เขียนหรืออ่านภาพจากภายนอก. `/api/player/me` และ `/api/player/bookings` รองรับการอ่านข้อมูลส่วนตัวหลังตรวจ ID token กับ LINE ฝั่ง server แล้ว. ตั้งค่า Developing channel/LIFF และ scopes `openid`, `profile` แล้ว ผู้ใช้รายงานว่าล็อกอินบนมือถือได้. เปิดเฉพาะ POST `/api/player/me/profile` หลังตรวจ ID token ฝั่ง server; ชื่อและรูปมาจาก LINE และบันทึกโปรไฟล์พร้อม audit ใน TiDB transaction เดียวกัน. ตรวจ origin, ชนิด JSON, ขนาด 4 KB, ระดับ 2.0–5.0 และแนะนำตัวไม่เกิน 160 ตัวอักษร; กันบันทึกซ้ำภายใน 2 วินาทีโดยตรวจข้อมูลใต้ row lock. การป้องกันนี้ยังไม่ใช่ rate limit สำหรับทุก API. ยังต้องยืนยันการบันทึกด้วยบัญชีจริงบนมือถือ. การจอง, อัปโหลดและตรวจสลิป, แอดมิน, การเงิน และ OCR ยังปิดบน URL นี้. `/api/health` ต้องแสดง `mode: tidb-profile-preview`, `database: tidb` และ `receiptStorageConfigured: true`; POST โปรไฟล์ที่ไม่มี token ต้องได้ 401; mutation สำหรับจอง/สลิปยังได้ 503.
+## ระบบที่พอร์ตไป Worker แล้ว
 
-พรีวิวเดิม `https://chick-pick-preview.nuibhr1.workers.dev/miniapp` ยังเป็น static preview แยกกัน. ห้ามใช้ URL ใดรับเงินหรือให้ผู้เล่นจองจนกว่าจะผ่านการทดสอบระบบจริงครบ.
+- ยืนยัน LINE ID token ฝั่ง server; ผูกเจ้าของครั้งแรกด้วยรหัสสุ่ม 12 ตัวที่อยู่ใน Worker secret และไฟล์ส่วนตัว เจ้าของหนึ่งบัญชีเท่านั้น บัญชีทั่วไปเข้าแอดมินไม่ได้
+- Session ผู้จัดเป็น cookie ที่เซ็น HMAC, HttpOnly, Secure, SameSite=Strict อายุ 30 นาที ทุกคำขอตรวจเทียบกับเจ้าของใน TiDB; logout ล้าง cookie แต่ cookie ที่ถูกขโมยก่อน logout ยังมีอายุที่เหลืออยู่ จึงยังไม่มีการ revoke session แยกรายเครื่อง
+- สร้างก๊วนใหม่ กำหนดสนาม เวลาไทย ราคา จำนวนคน คอร์ท และสไตล์ เบา–กลาง / สูง
+- ตั้งบัญชีรับโอน และเปิด/ปิดรับจองใหม่ โดยเริ่มต้นปิด จองคำนวณราคาฝั่ง server พร้อม row lock ตรวจจำนวนที่นั่งและป้องกันจองซ้ำ
+- รับ JPG/PNG/WebP ไม่เกิน 5 MB ตรวจ MIME และ signature รูป เก็บภาพใน private KV; รูปอ่านได้เฉพาะผู้จัดที่ตรวจสิทธิ์แล้ว ข้อมูลจองและประวัติ audit บันทึกใน TiDB transaction เดียวกัน
+- ไม่อนุญาตใช้ไฟล์สลิปเดียวกันกับการจองอื่นที่ยังไม่ถูกปฏิเสธ การจับ hash กันได้เฉพาะไฟล์เหมือนกัน ไม่ใช่ตรวจสลิปปลอม/การแก้ภาพ
+- ผู้จัดเปิดภาพและเทียบรายการเงินจริงในธนาคารก่อนยืนยัน ยืนยันเงินแล้วต้องเลือกคนเข้าสนามแยกอีกครั้ง ผู้เล่นส่งใหม่ได้เมื่อถูกปฏิเสธ
+- จำกัดเข้าแอดมิน 8 ครั้งต่อ IP ใน 15 นาที และอัปโหลด 20 ครั้งต่อบัญชีใน 24 ชั่วโมง เก็บตัวนับใน TiDB; แต่ละรายการจองจำกัด 10 สลิปต่อวัน ไม่มี rate limit ครอบคลุมทุก API
+- โปรไฟล์ รูปหมวดสนาม ตัวกรอง 2 สไตล์ เมนูล่าง parallax และธีมตามมือถือยังอยู่ครบ
 
-## Deploy staging ใหม่
+## ผูกเจ้าของก่อนทดลอง
 
-`build:cloudflare` ตรวจไฟล์ใน `public/` เทียบกับรายการที่เลือกเข้า Git ก่อน build. หากมีไฟล์ใหม่ ให้ตรวจเนื้อหาและ stage เฉพาะ asset ของแอป; เก็บเอกสารส่วนตัวนอก `public/` เสมอ. โฟลเดอร์ `artifacts/` ถูก ignore และไม่ได้อยู่ใน assets directory. ปิด Version URLs เพื่อไม่ให้เข้ารุ่นเก่าผ่าน URL พรีวิวแยก.
+1. เปิดพื้นที่ผู้จัดบน HTTPS ข้างต้น ใช้ LINE ของเจ้าของ เมื่อชื่อถูกต้อง ใส่รหัส 12 ตัวจาก `artifacts/private-config/line-organizer-pairing.txt` บนเครื่อง แล้วกดผูกบัญชีนี้เป็นเจ้าของ ห้ามส่งรหัสในแชตหรือใส่ Git
+2. เข้า บัญชีและการเปิดรับ ใส่บัญชีจริง; สร้างก๊วนวันเวลาในอนาคต ตรวจสนาม ราคา และจำนวนคนก่อนเปิดรับจอง
+3. ทดลองบนมือถือด้วยบัญชีผู้ทดสอบที่มีสิทธิ์ Developing: จอง → แนบสลิป → ดูรายการรอตรวจ → เทียบยอดธนาคาร → อนุมัติ → รับเข้าสนาม ให้บัญชีอื่นตรวจว่าไม่เห็นสลิป/รายการของคนอื่น
+4. เริ่มกลุ่มปิดเล็กก่อน การคืนเงินและค่าคอมต้องดำเนินการและเก็บหลักฐานเองในระยะนี้
+
+หากยังไม่มีเจ้าของหรือยังปิด worker-pilot.bookingEnabled, config ต้องแสดง bookingEnabled=false ระบบจะไม่รับจองใหม่ การปิดรับจองไม่ได้ปิดการส่งและตรวจสลิปของรายการเดิม
+
+## Deploy
 
 ```sh
-npm ci
 npm run lint
+node --import tsx --test src/*.test.ts server/*.test.ts cloudflare/*.test.ts
 npm run build:cloudflare
 npx wrangler deploy --config wrangler.tidb.jsonc
 ```
 
-ตั้ง `TIDB_DATABASE_URL` เป็น Cloudflare Worker secret ของ `chick-pick-tidb-staging` ด้วย `wrangler secret put TIDB_DATABASE_URL --config wrangler.tidb.jsonc` หรือใน Dashboard. ห้ามใส่ค่าใน `wrangler.tidb.jsonc`, GitHub, ตัวแปร `VITE_` หรือคำสั่งที่พิมพ์ URL ออกหน้าจอ. URL ต้องเป็น TiDB Cloud endpoint ที่ Serverless driver รองรับ.
+Worker secrets: TIDB_DATABASE_URL, ADMIN_SESSION_SECRET, ADMIN_PAIRING_TOKEN. ห้ามเปิดเผยค่าใน logs, Git, config หรือ VITE_ ตัวแปร LINE_CHANNEL_ID และ VITE_LIFF_ID เป็น public identifiers; ไม่ใช้ Channel secret สำหรับตรวจ ID token
 
-## ขั้นก่อนเปิดรับเงินจริง
+`build:cloudflare` ตรวจไฟล์ public เทียบกับรายการ Git และปฏิเสธไฟล์ที่ไม่เลือกเข้า Git หรือ symlink โฟลเดอร์ artifacts ถูก ignore; ห้ามใส่เอกสารส่วนตัวใน public. ปิด version preview URLs และคง route ปิดกั้นเอกสารส่วนตัวเดิม
 
-1. พอร์ต admin auth และทุก mutation ไปยัง TiDB HTTP driver พร้อม transaction และ rate limit ที่คงอยู่ข้าม Worker isolates. ตรวจขอบเขต CPU 10 ms ของ Workers Free โดยเฉพาะ password hashing, JSON document โตขึ้น และภาพสลิป.
-2. ผูกการอัปโหลดสลิปกับ KV โดยใช้ key สุ่มรายภาพ, ตรวจสิทธิ์ฝั่ง server ทุกครั้งที่อ่าน และลบ key หาก transaction ใน TiDB ล้มเหลว. ทดสอบอัปโหลด/อ่าน/ลบ/สำรองและกำหนดอายุข้อมูล; อย่าใช้ `node:fs` บน Worker เป็นที่เก็บถาวร. Workers KV Free จำกัด 1 GB และ 1,000 writes/วัน จึงต้องติดตามการใช้จริงก่อนขยายก๊วน.
-3. ทดสอบ LINE MINI App Developing ที่เชื่อมไว้ด้วย ID token บนมือถือ. เปิดรับจองเมื่อ auth, สิทธิ์ผู้จัด, capacity และ idempotency ผ่านการทดสอบพร้อมกัน.
-4. ทดสอบเส้นทางเงินจริงแบบปิด: จอง → แนบสลิป → แอดมินเทียบยอดเงินเข้าบัญชีจริง → อนุมัติ/ปฏิเสธ → เลือกคนลงสนาม → ตรวจรายรับและค่าคอม → คืนเงิน/แก้ยอด. OCR เป็นข้อมูลช่วยอ่าน ไม่ใช่หลักฐานว่าเงินเข้า.
+## ข้อจำกัดที่ต้องทำต่อ
 
-การทดสอบ `SELECT` จาก TiDB และหน้า HTTPS ไม่ยืนยันว่าขั้นตอนรับจองหรือรับเงินพร้อมใช้งาน.
+- OCR ยังไม่เชื่อม จึงไม่ส่งภาพไป Hugging Face; การตรวจภาพและยอดเงินจริงเป็นหน้าที่ผู้จัด
+- ปฏิทินโค้ชบน Worker ยังเป็นข้อมูลตัวอย่าง ไม่มีเวลาจองจริง ระบบค่าคอม/ปิดยอด/คืนเงิน/แต้มแลกของและการจัดรอบลงคอร์ทจากแอดมินยังไม่ได้พอร์ตขึ้น Worker
+- ยังไม่มีหมดอายุที่นั่งที่จองแต่ไม่ชำระเงิน, ยกเลิกก๊วน/คืนเงินหลังรับเงิน, เจ้าของหลายคลับ, recovery สิทธิ์เจ้าของ หรือการแจ้งเตือน LINE
+- KV ไม่มี transaction ร่วมกับ TiDB และอาจอ่านชั่วคราวไม่พบ หลังธุรกรรมถูกปฏิเสธทางธุรกิจจะลบภาพใหม่ แต่ถ้า network/commit ไม่ทราบผลจะเก็บภาพไว้กันหลักฐานหาย ต้องมี reconciliation, backup, retention และตรวจโควตาก่อนขยายจริง
+- เก็บ marketplace ใน JSON document เดียว จึงมี row lock ร่วมและขนาดเติบโต ต้องทดสอบโหลดและ CPU บน Workers Free พร้อมแยกตารางเมื่อขยาย
+- Developing Channel ID 2011829684, LIFF ID 2011829684-nZbaL7lP ใช้เฉพาะผู้ทดสอบที่มีสิทธิ์ การเปิดบุคคลทั่วไปต้องตั้งค่า Review/Published คู่ identifiers ให้ถูกต้อง
 
-## เชื่อม LINE MINI App สำหรับ staging
+## ผลตรวจ
 
-ใช้ provider Chick&Pick เดิม และเลือกประเทศไทย. การสร้าง channel ต้องให้เจ้าของบัญชียืนยันข้อตกลงและสิทธิ์ดำเนินการก่อน.
+Typecheck และชุดทดสอบ 39 รายการผ่าน รวม cookie ปลอม บัญชีที่ไม่ใช่เจ้าของ คำขอข้าม origin ที่นั่งสุดท้ายพร้อมกัน retry ไม่จองซ้ำ สลิป private/ซ้ำ/ผิดชนิด/ใหญ่เกิน ปฏิเสธแล้วส่งใหม่ ยืนยันเงินจริงก่อนอนุมัติ และรับเข้าสนามแยกจากตรวจเงิน
 
-สถานะที่ตรวจเมื่อ 2 ตุลาคม 2026: เจ้าของสร้าง MINI App แล้ว; Developing Channel ID `2011829684`, LIFF ID `2011829684-nZbaL7lP`, [ลิงก์ทดสอบบน LINE](https://miniapp.line.me/2011829684-nZbaL7lP). ตั้ง Endpoint ของ Developing และ scopes แล้ว. Worker version `51870282-3a89-4be2-ae84-07d8d06a59cb` ตอบ `connected: true`, `lineConfigured: true`; ไม่มี token หรือ token ปลอมได้ 401; booking POST ได้ 503. ลิงก์ MINI App บน desktop แสดง QR สำหรับมือถือ. ผู้ใช้รายงานว่าล็อกอินได้แล้ว แต่ยังไม่ยืนยันการบันทึกโปรไฟล์ผ่านมือถือหลังแก้ไข และยังไม่ได้เชื่อม Endpoint ของ Review/Published.
-
-1. ในแท็บ Web app settings ตั้ง Endpoint URL ของ Developing เป็น `https://chick-pick-tidb-staging.nuibhr1.workers.dev/miniapp` และตรวจ scopes `openid` กับ `profile`.
-2. คัดลอก Channel ID **ของ Developing** และ LIFF ID **ของ Developing** มาตั้ง Worker vars `LINE_CHANNEL_ID` และ `VITE_LIFF_ID` ใน `wrangler.tidb.jsonc`. ทั้งคู่เป็น public identifiers; ห้ามใส่ Channel secret หรือ access token ในไฟล์นี้. Worker ตรวจ ID token ผ่าน LINE โดยไม่ต้องใช้ Channel secret.
-3. Deploy แล้วตรวจ `/api/player/config`: `connected: true`, LIFF ID ตรงกับ Console และ `profileEditingEnabled: true`, `bookingEnabled: false`. `/api/health` ต้องแสดง `lineConfigured: true`. เรียก `/api/player/me` โดยไม่มี token หรือใช้ token ปลอมต้องได้ 401.
-4. เปิด Developing LIFF URL จาก Console บนมือถือด้วยบัญชีที่เป็นผู้ทดสอบที่ตอบรับคำเชิญแล้ว หรือมีสิทธิ์ใน channel. ตรวจชื่อ/ภาพของบัญชีจริงและรายการจองเฉพาะเจ้าของบัญชี.
-5. ก่อนเปิดให้ผู้เล่นทั่วไป ใช้ Published Channel ID/LIFF ID คู่ใหม่และตั้ง Endpoint URL ของ Published ให้ตรงกับ deployment. อย่าสลับ Channel ID ของ Developing กับ LIFF ID ของ Published เพราะ ID token จะไม่ผ่านการตรวจ audience.
-
-LINE MINI App มี Developing, Review และ Published แยก Channel ID/LIFF ID. MINI App ที่ยังไม่ verified ใช้ทดสอบได้ แต่ Developing จำกัดบัญชีที่มีสิทธิ์ และความสามารถบางรายการต้องผ่าน review. ดู [LINE MINI App Console guide](https://developers.line.biz/en/docs/line-mini-app/discover/console-guide/).
-
-## ปรับหน้า Mini App วันที่ 2 ตุลาคม 2026
-
-Worker version `361a0da2-27a5-46dd-a069-b1fe8633b6ae` เปิดแก้โปรไฟล์แยกจากการจอง. เปลี่ยนตัวกรองเป็น เบา–กลาง / สูง โดยแบ่งตามระดับต่ำสุดของก๊วนที่ 3.5; รูปที่ผู้ใช้ส่งแสดงครบโดยไม่ตัดข้อความ. เพิ่มภาพปกหมวดสนาม, เมนูล่าง 5 หน้า, การจำตำแหน่งเลื่อน, parallax บนภาพตกแต่ง และธีมตามมือถือพร้อมตัวเลือกสว่าง/มืด. เคารพการตั้งค่าลดการเคลื่อนไหว.
-
-ตรวจ UI ที่ความกว้าง 320/390 px, ตัวกรองสองระดับ, เมนูทั้งห้า, การจำธีมหลัง reload และ profile save ใน fixture ที่เปิดแก้โปรไฟล์แต่ปิด booking. ตรวจ TiDB transaction/audit insert ด้วย rollback โดยไม่ทิ้งข้อมูลทดสอบ. Live config แสดง profileEditingEnabled true, bookingEnabled false; token หาย/ปลอมได้ 401, foreign origin ได้ 403, booking/receipt POST ได้ 503. การบันทึกโปรไฟล์ด้วยบัญชีจริงบน LINE มือถือยังต้องให้เจ้าของบัญชีตรวจ.
+ตรวจ UI หลังบ้านด้วย fixture ในเครื่อง: ปุ่มอนุมัติปิดก่อนยืนยันยอด หลังอนุมัติจำนวนเข้าสนามยังเป็น 0 และมีปุ่มให้ผู้จัดรับคนเอง; ความกว้าง 390 px ไม่มี horizontal overflow. ตรวจ marketplace row lock และ audit insert บน TiDB จริงด้วย rollback โดยไม่ทิ้งข้อมูลทดสอบ ผลนี้ยังไม่ใช่หลักฐานว่าจองและชำระเงินจริงบน LINE มือถือผ่านแล้ว

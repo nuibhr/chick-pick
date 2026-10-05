@@ -8,6 +8,7 @@ export const playStyles: { id: PlayStyle; label: string; description: string; im
 
 // Keep existing session records searchable without rewriting historical data.
 export function sessionPlayStyle(session: Pick<PublicSession, 'title' | 'dupr' | 'vibe' | 'tags'>): PlayStyle {
+  if (/^\s*</.test(session.dupr)) return 'casual';
   const numeric = session.dupr.match(/\d+(?:\.\d+)?/);
   if (numeric) return Number(numeric[0]) >= 3.5 ? 'high' : 'casual';
   const description = [session.title, session.vibe, ...session.tags].join(' ').toLowerCase();
