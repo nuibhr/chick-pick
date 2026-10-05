@@ -2,6 +2,8 @@ import type { ReceiptSubmission } from '../src/marketplaceTypes';
 import { TidbDocuments, type Audit } from './tidbDocuments';
 import { adminCookie, authenticateAdmin, clearAdminCookie, digest, limitAuth, organizerKey, type Organizer } from './pilotAuth';
 import { admit, book, cancel, fail, newSession, PilotError, receiptEligibility, review, submitReceipt, transferAccount, unavailableOcr, type Actor } from './pilotDomain';
+import { configure, createEntry, csv, report, revenueReport, settle, updateEntry } from './financeDomain';
+import { authorize, changeMember, claim, emptyTeam, invite, publicTeam, teamKey, type Team, type Member } from './adminTeam';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
 export type PilotEnv = { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
@@ -34,7 +36,7 @@ const audit = (actor: Actor, action: string, entityId: string, admin = false): A
 export async function pilotRequest(request: Request, env: PilotEnv, verify: Verify): Promise<Response | null> {
   const path = new URL(request.url).pathname;
   const playerMutation = path === '/api/player/bookings' && request.method === 'POST' || /^\/api\/player\/bookings\/[^/]+\/(receipt|cancel)$/.test(path);
-  const handled = path === '/api/player/config' || path === '/api/finance/auth' || path === '/api/finance/logout' || path.startsWith('/api/marketplace') || playerMutation;
+  const handled = path === '/api/player/config' || path.startsWith('/api/finance/') || path.startsWith('/api/marketplace') || playerMutation;
   if (!handled) return null;
   try {
     if (!['GET', 'POST'].includes(request.method)) fail(405, 'วิธีส่งคำขอไม่รองรับ');
@@ -48,22 +50,27 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     if (path === '/api/finance/auth') {
       const owner = await db.readDocument<Partial<Organizer>>(organizerKey, {});
       if (request.method === 'GET') {
-        let authenticated = false; try { await authenticateAdmin(request, env.ADMIN_SESSION_SECRET, db); authenticated = true; } catch { /* Public readiness contains no identity. */ }
-        return json({ authenticated, setupRequired: false, authMethod: 'line', pairingRequired: !owner.sub, liffId: env.VITE_LIFF_ID || null, configured: Boolean(env.ADMIN_SESSION_SECRET && env.LINE_CHANNEL_ID && env.VITE_LIFF_ID && (owner.sub || env.ADMIN_PAIRING_TOKEN)) });
+        let admin = null; try { admin = await authenticateAdmin(request, env.ADMIN_SESSION_SECRET, db); } catch { /* Public readiness contains no identity. */ }
+        return json({ authenticated: Boolean(admin), ...(admin ? { role: admin.role, name: admin.name } : {}), setupRequired: false, authMethod: 'line', pairingRequired: !owner.sub, liffId: env.VITE_LIFF_ID || null, configured: Boolean(env.ADMIN_SESSION_SECRET && env.LINE_CHANNEL_ID && env.VITE_LIFF_ID && (owner.sub || env.ADMIN_PAIRING_TOKEN)) });
       }
       if (!env.ADMIN_SESSION_SECRET || !env.LINE_CHANNEL_ID) fail(503, 'ระบบแอดมิน LINE ยังไม่พร้อม');
       await limitAuth(db, request.headers.get('CF-Connecting-IP') || 'unknown');
       const v = await body(request);
       if (typeof v.idToken !== 'string' || v.idToken.length < 20 || v.idToken.length > 4096) fail(401, 'เข้าสู่ LINE ก่อน');
       let actor: Actor; try { actor = await verify(String(v.idToken), env.LINE_CHANNEL_ID); } catch { return fail(401, 'ยืนยันบัญชี LINE ไม่สำเร็จ'); }
+      let member: Member | undefined;
       if (!owner.sub) {
         if (!env.ADMIN_PAIRING_TOKEN || typeof v.pairingToken !== 'string' || !/^[A-Za-z0-9]{12}$/.test(v.pairingToken.trim()) || await digest(v.pairingToken.trim().toUpperCase()) !== await digest(env.ADMIN_PAIRING_TOKEN)) fail(403, 'รหัสผูกเจ้าของ 12 ตัวไม่ถูกต้อง');
         await db.updateDocument<Partial<Organizer>, void>(organizerKey, {}, saved => {
           if (saved.sub) fail(409, 'มีเจ้าของแล้ว กรุณาล็อกอินใหม่');
           Object.assign(saved, { sub: actor.sub, name: actor.name, linkedAt: new Date().toISOString() });
         }, audit(actor, 'organizer.linked', organizerKey, true));
-      } else if (owner.sub !== actor.sub) fail(403, 'บัญชี LINE นี้ไม่มีสิทธิ์ผู้จัด');
-      return json({ authenticated: true }, 200, { 'Set-Cookie': await adminCookie(env.ADMIN_SESSION_SECRET, { ...actor, linkedAt: '' }) });
+      } else if (owner.sub !== actor.sub) {
+        const team = await db.readDocument<Team>(teamKey, emptyTeam());
+        member = team.members.find(m => m.sub === actor.sub && m.active);
+        if (!member) member = await db.updateDocument<Team, Member>(teamKey, emptyTeam(), value => claim(value, actor, v.pairingToken), audit(actor, 'admin.invitation.claimed', teamKey, true));
+      }
+      return json({ authenticated: true, role: member?.role || 'owner' }, 200, { 'Set-Cookie': await adminCookie(env.ADMIN_SESSION_SECRET, { ...actor, linkedAt: '', version: member?.version }) });
     }
     if (path === '/api/finance/logout') { if (request.method !== 'POST') fail(405, 'ใช้ POST'); return json({ success: true }, 200, { 'Set-Cookie': clearAdminCookie() }); }
     if (playerMutation) {
@@ -97,11 +104,33 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       return json({ receipt: { id: receiptId, status: 'pending', ocr: receipt.ocr }, message: 'ส่งสลิปแล้ว รอแอดมินตรวจยอดเข้าบัญชี' }, 201);
     }
     const owner = await authenticateAdmin(request, env.ADMIN_SESSION_SECRET, db);
+    authorize(owner.role, path, request.method);
+    if (path === '/api/finance/admin-team') {
+      if (request.method === 'GET') return json(publicTeam(await db.readDocument<Team>(teamKey, emptyTeam())));
+      const v = await body(request);
+      return json(await db.updateDocument<Team, unknown>(teamKey, emptyTeam(), value => v.action === 'invite' ? invite(value, v) : changeMember(value, v), audit(owner, `admin.team.${String(v.action)}`, String(v.id || teamKey), true)), v.action === 'invite' ? 201 : 200);
+    }
+    if (path.startsWith('/api/finance/')) {
+      if (request.method === 'GET') {
+        const docs = await db.readFinance();
+        if (path === '/api/finance/revenue') return json(await revenueReport(docs));
+        if (path === '/api/finance/report') return json(report(docs, new URL(request.url).searchParams));
+        if (path === '/api/finance/export') return new Response(csv(report(docs, new URL(request.url).searchParams).rows), { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="chick-pick-finance.csv"', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
+        fail(404, 'ไม่พบเมนูการเงิน');
+      }
+      const v = await body(request), event = { actorId: owner.sub, actorType: 'admin' as const, entityType: 'finance', entityId: String(v.key || v.requestId || path) };
+      if (path === '/api/finance/revenue/config') return json(await db.updateFinance(d => configure(d, v), { ...event, action: 'revenue.configured' }));
+      if (path === '/api/finance/revenue/settle') return json(await db.updateFinance(d => settle(d, v), { ...event, action: 'revenue.closed' }), 201);
+      if (path === '/api/finance/entries') { const r = await db.updateFinance(d => createEntry(d, v), { ...event, action: 'finance.created' }); return json(r.row, r.repeated ? 200 : 201); }
+      const entry = path.match(/^\/api\/finance\/entries\/([^/]+)$/);
+      if (entry) return json(await db.updateFinance(d => updateEntry(d, decodeURIComponent(entry[1]), v), { ...event, entityId: decodeURIComponent(entry[1]), action: `finance.${v.action}` }));
+      fail(404, 'ไม่พบเมนูการเงิน');
+    }
     if (path === '/api/marketplace' || path === '/api/marketplace/') {
       if (request.method !== 'GET') fail(405, 'ใช้ GET');
       const data = await db.readMarketplace(); return json({ ...data, demo: false, pilot: true });
     }
-    if (path === '/api/marketplace/setup') { if (request.method !== 'GET') fail(405, 'ใช้ GET'); return json({ transferAccount: await db.readTransferAccount(), pilot: await db.readDocument('worker-pilot', { bookingEnabled: false }), ownerName: owner.name, ocrConfigured: false }); }
+    if (path === '/api/marketplace/setup') { if (request.method !== 'GET') fail(405, 'ใช้ GET'); return json({ transferAccount: owner.role === 'viewer' ? null : await db.readTransferAccount(), pilot: await db.readDocument('worker-pilot', { bookingEnabled: false }), ownerName: owner.name, role: owner.role, ocrConfigured: false }); }
     if (path === '/api/marketplace/setup/transfer-account' && request.method === 'POST') {
       const account = transferAccount(await body(request)); if (!account) fail(400, 'ระบุธนาคาร ชื่อบัญชี และเลขบัญชี 10–15 หลัก');
       await db.updateDocument('transfer-account', {} as Record<string, unknown>, saved => Object.assign(saved, account), audit(owner, 'transfer_account.updated', 'transfer-account', true)); return json({ transferAccount: account });

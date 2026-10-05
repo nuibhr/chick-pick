@@ -1,6 +1,8 @@
 import { connect } from '@tidbcloud/serverless';
 import type { MarketplaceData, TransferAccount } from '../src/marketplaceTypes';
 import type { PilotContext } from './pilotDomain';
+import type { FinanceDocuments } from './financeDomain';
+const financeKeys = ['marketplace', 'coaching', 'finance', 'revenue-config', 'revenue-settlements'] as const;
 
 export type Audit = { actorId: string; action: string; entityId: string; actorType?: 'admin' | 'line'; entityType?: string };
 
@@ -28,6 +30,35 @@ export class TidbDocuments {
     const data = document<MarketplaceData>(result.rows as Row[] | null);
     if (!Array.isArray(data.sessions) || !Array.isArray(data.bookings)) throw new Error('Marketplace document is invalid');
     return data;
+  }
+
+  async readFinance(): Promise<FinanceDocuments> {
+    const rows = (await this.db.execute('SELECT document_key, payload FROM app_documents WHERE document_key IN (?, ?, ?, ?, ?)', [...financeKeys])).rows as Row[] | null;
+    return this.financeDocuments(rows || []);
+  }
+
+  private financeDocuments(rows: Row[]): FinanceDocuments {
+    const values = Object.fromEntries(rows.map(row => [String(row.document_key), typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload]));
+    if (!Array.isArray(values.marketplace?.bookings) || !Array.isArray(values.marketplace?.sessions)) throw Error('Missing marketplace');
+    for (const key of financeKeys.filter(k => k !== 'marketplace')) { values[key] ??= []; if (!Array.isArray(values[key])) throw Error('Invalid financial document'); }
+    return structuredClone(values) as FinanceDocuments;
+  }
+
+  async updateFinance<T>(mutate: (docs: FinanceDocuments) => T | Promise<T>, audit: Audit): Promise<T> {
+    const tx = await this.db.begin();
+    try {
+      // Same first lock as booking and receipt mutations, then sorted financial rows.
+      const market = (await tx.execute('SELECT document_key, payload FROM app_documents WHERE document_key = ? FOR UPDATE', ['marketplace'])).rows as Row[] | null;
+      if (!market?.length) throw Error('Missing marketplace');
+      for (const key of financeKeys.filter(k => k !== 'marketplace')) await tx.execute('INSERT IGNORE INTO app_documents (document_key, payload) VALUES (?, ?)', [key, '[]']);
+      const rows = (await tx.execute('SELECT document_key, payload FROM app_documents WHERE document_key IN (?, ?, ?, ?) ORDER BY document_key FOR UPDATE', ['coaching', 'finance', 'revenue-config', 'revenue-settlements'])).rows as Row[] | null;
+      const docs = this.financeDocuments([...market, ...(rows || [])]);
+      const before = new Map(financeKeys.map(key => [key, JSON.stringify(docs[key])]));
+      const result = await mutate(docs);
+      for (const key of financeKeys) if (JSON.stringify(docs[key]) !== before.get(key)) await tx.execute('UPDATE app_documents SET payload = ?, version = version + 1 WHERE document_key = ?', [JSON.stringify(docs[key]), key]);
+      await tx.execute('INSERT INTO audit_events (id, actor_type, actor_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?)', [crypto.randomUUID(), 'admin', audit.actorId, audit.action, audit.entityType || 'finance', audit.entityId, null]);
+      await tx.commit(); return result;
+    } catch (e) { await tx.rollback(); throw e; }
   }
 
   async updateMarketplace<T>(mutate: (data: MarketplaceData, context: PilotContext) => T | Promise<T>, audit?: Audit, pilot = false): Promise<T> {

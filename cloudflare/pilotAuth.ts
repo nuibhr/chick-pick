@@ -1,7 +1,10 @@
 import { TidbDocuments } from './tidbDocuments';
 import { fail } from './pilotDomain';
+import { emptyTeam, teamKey, type Team } from './adminTeam';
+import { isStaffRole, type AdminRole } from '../src/adminRoles';
 
 export type Organizer = { sub: string; name: string; linkedAt: string };
+export type AdminIdentity = Organizer & { role: AdminRole; version?: string };
 export const organizerKey = 'worker-organizer';
 const encoder = new TextEncoder();
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -12,8 +15,8 @@ export const authCookieName = '__Host-cp_admin';
 const cookie = (value: string, seconds: number) => `${authCookieName}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${seconds}`;
 export const clearAdminCookie = () => cookie('', 0);
 async function key(secret: string) { return crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']); }
-export async function adminCookie(secret: string, owner: Organizer) {
-  const payload = btoa(JSON.stringify({ sub: owner.sub, exp: Date.now() + 1800000, nonce: crypto.randomUUID() }));
+export async function adminCookie(secret: string, owner: Organizer & { version?: string }) {
+  const payload = btoa(JSON.stringify({ sub: owner.sub, version: owner.version, exp: Date.now() + 1800000, nonce: crypto.randomUUID() }));
   const signature = hex(await crypto.subtle.sign('HMAC', await key(secret), encoder.encode(payload)));
   return cookie(`${payload}.${signature}`, 1800);
 }
@@ -28,8 +31,12 @@ export async function authenticateAdmin(request: Request, secret: string | undef
     if (!(await crypto.subtle.verify('HMAC', await key(secret), bytes, encoder.encode(payload)))) throw Error('invalid');
     const claims = JSON.parse(atob(payload));
     const owner = await db.readDocument<Partial<Organizer>>(organizerKey, {});
-    if (!owner.sub || claims.sub !== owner.sub || !Number.isFinite(claims.exp) || claims.exp <= Date.now() || claims.exp > Date.now() + 1800000) throw Error('expired');
-    return owner as Organizer;
+    if (!owner.sub || !Number.isFinite(claims.exp) || claims.exp <= Date.now() || claims.exp > Date.now() + 1800000) throw Error('expired');
+    if (claims.sub === owner.sub) return { ...owner, role: 'owner' } as AdminIdentity;
+    const team = await db.readDocument<Team>(teamKey, emptyTeam());
+    const member = team.members.find(m => m.sub === claims.sub && m.active && m.version === claims.version && isStaffRole(m.role));
+    if (!member) throw Error('revoked');
+    return { sub: member.sub, name: member.name, role: member.role, version: member.version, linkedAt: member.joinedAt } as AdminIdentity;
   } catch { return fail(401, 'สิทธิ์ผู้จัดหมดอายุหรือไม่ถูกต้อง กรุณาเข้า LINE ใหม่'); }
 }
 export async function limitAuth(db: TidbDocuments, ip: string, upload = false) {

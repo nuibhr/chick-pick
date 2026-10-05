@@ -11,11 +11,12 @@ const params = new URLSearchParams(window.location.search);
 let organizerIntent = params.get('organizer') === '1';
 try {
   if (organizerIntent) sessionStorage.setItem('cp-organizer-intent', String(Date.now()));
-  if (params.get('organizer') === '0') sessionStorage.removeItem('cp-organizer-intent');
+  if (params.get('organizer') === '0') { sessionStorage.removeItem('cp-organizer-intent'); sessionStorage.removeItem('cp-workspace-intent'); }
+  if (organizerIntent && params.get('workspace')) sessionStorage.setItem('cp-workspace-intent', params.get('workspace')!);
   const saved = Number(sessionStorage.getItem('cp-organizer-intent'));
   organizerIntent ||= window.location.pathname === '/miniapp' && saved > 0 && Date.now() - saved < 900000;
 } catch { /* Explicit query still works when session storage is unavailable. */ }
-const isAdmin = organizerIntent || params.get('admin') === '1' || window.location.pathname === '/admin';
+const isAdmin = organizerIntent || params.get('admin') === '1' || ['/admin', '/platform', '/backoffice'].includes(window.location.pathname);
 const isPlayer = window.location.pathname === '/miniapp';
 
 createRoot(document.getElementById('root')!).render(

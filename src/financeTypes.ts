@@ -11,4 +11,4 @@ export type FinanceRow = {
   history: { at: string; action: string; reason?: string }[];
   allocationKey?: string;
 };
-export type FinanceReport = { rows: FinanceRow[]; summary: { income: number; expense: number; net: number; pendingIncome: number; pendingExpense: number }; daily: { date: string; income: number; expense: number }[]; breakdown: { category: FinanceCategory; amount: number; type: 'income' | 'expense' }[] };
+export type FinanceReport = { pilot?: boolean; rows: FinanceRow[]; summary: { income: number; expense: number; net: number; pendingIncome: number; pendingExpense: number }; daily: { date: string; income: number; expense: number }[]; breakdown: { category: FinanceCategory; amount: number; type: 'income' | 'expense' }[] };

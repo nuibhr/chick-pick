@@ -4,6 +4,7 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from '
 import path from 'node:path';
 import { categories, type FinanceRow, type FinanceReport } from '../src/financeTypes';
 import type { Enrollment } from '../src/coachingTypes';
+import { platformDistribution } from '../src/revenueMath';
 import { defaultRevenueConfig, revenueUnits } from './revenue';
 import type { RevenueConfig, RevenueUnit } from '../src/revenueTypes';
 import type { MarketplaceData } from '../src/marketplaceTypes';
@@ -16,18 +17,8 @@ function read<T>(file: string, fallback: T): T { return existsSync(file) ? JSON.
 function save(file: string, value: unknown) { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file + '.tmp', JSON.stringify(value, null, 2)); renameSync(file + '.tmp', file); }
 const incomeCategories = ['coaching', 'game', 'other_income'];
 
-export function summarize(rows: FinanceRow[]): FinanceReport {
-  const sum = (type: string, status: string) => rows.filter(r => r.type === type && r.status === status).reduce((a, r) => a + r.amount, 0);
-  const income = sum('income', 'settled'), expense = sum('expense', 'settled');
-  const daily = new Map<string, { date: string; income: number; expense: number }>();
-  const breakdown = new Map<string, FinanceReport['breakdown'][number]>();
-  for (const row of rows.filter(r => r.status === 'settled')) {
-    const date = row.settledOn || row.date;
-    const point = daily.get(date) || { date, income: 0, expense: 0 }; point[row.type] += row.amount; daily.set(date, point);
-    const group = breakdown.get(row.category) || { category: row.category, amount: 0, type: row.type }; group.amount += row.amount; breakdown.set(row.category, group);
-  }
-  return { rows, summary: { income, expense, net: income - expense, pendingIncome: sum('income', 'pending'), pendingExpense: sum('expense', 'pending') }, daily: [...daily.values()].sort((a, b) => a.date.localeCompare(b.date)), breakdown: [...breakdown.values()].sort((a, b) => b.amount - a.amount) };
-}
+export { summarize } from '../src/financeModel';
+import { summarize } from '../src/financeModel';
 
 export function createFinance(directory = path.resolve('data'), enabled = process.env.NODE_ENV !== 'production', documents?: MarketplaceStore) {
   const router = Router();
@@ -112,7 +103,9 @@ export function createFinance(directory = path.resolve('data'), enabled = proces
       if (!settlement) return unit;
       return { ...unit, rule: settlement.rule, settlement, changed: unit.fingerprint !== settlement.fingerprint, gross: settlement.gross, refunds: settlement.refunds, directCosts: settlement.directCosts, processing: settlement.processing, distributable: settlement.distributable, platform: settlement.platform, partner: settlement.partner, remainingPartner: Math.max(0, settlement.partner - unit.paidPartner - unit.pendingPartner), overpaid: Math.max(0, unit.paidPartner + unit.pendingPartner - settlement.partner) };
     });
-    return { config, history, units, unallocatedExpenses: allRows.filter(r => r.type === 'expense' && r.status !== 'void' && !r.allocationKey).reduce((s, r) => s + r.amount, 0) };
+    const distribution = { developer:0, marketing:0, retained:0, unconfigured:0 };
+    for (const u of units) { const split=platformDistribution(u.platform,u.settlement ? u.settlement.platformAllocation : config.platformAllocation); for (const k of Object.keys(distribution)) distribution[k]+=split[k]; }
+    return { config, history, units, platformDistribution: distribution, unallocatedExpenses: allRows.filter(r => r.type === 'expense' && r.status !== 'void' && !r.allocationKey).reduce((s, r) => s + r.amount, 0) };
   };
   router.get('/revenue', run(async (_req, res) => {
     const state = await revenueState();
@@ -121,13 +114,14 @@ export function createFinance(directory = path.resolve('data'), enabled = proces
     return res.json({ ...state, totals });
   }));
   router.post('/revenue/config', run(async (req, res) => {
-    const { game, coaching, expectedVersion } = req.body;
+    const { game, coaching, expectedVersion, platformAllocation } = req.body;
+    if (platformAllocation && (typeof platformAllocation.confirmed !== 'boolean' || ![platformAllocation.developerBps,platformAllocation.marketingBps].every(n=>Number.isInteger(n)&&n>=0&&n<=10000) || platformAllocation.developerBps + platformAllocation.marketingBps > 10000)) return res.status(400).json({message:'ส่วนผู้พัฒนาและการตลาดรวมกันต้องไม่เกิน 100% ของส่วนแพลตฟอร์ม'});
     const valid = (r: any) => r && ['gross', 'margin'].includes(r.basis) && Number.isInteger(r.platformBps) && r.platformBps >= 0 && r.platformBps <= 10000 && Number.isInteger(r.processingBps) && r.processingBps >= 0 && r.processingBps <= 10000;
     if (!valid(game) || !valid(coaching)) return res.status(400).json({ message: 'อัตราต้องอยู่ระหว่าง 0–100% และเลือกฐานคำนวณให้ครบ' });
     const result = await updateDoc<RevenueConfig[], { conflict: boolean; config?: RevenueConfig }>('revenue-config', revenueFile, [], history => {
       const previous = history.at(-1) || defaultRevenueConfig;
       if (expectedVersion !== previous.version) return { conflict: true };
-      const config: RevenueConfig = { game, coaching, version: previous.version + 1, confirmed: true, updatedAt: new Date().toISOString() };
+      const config: RevenueConfig = { game, coaching, platformAllocation: platformAllocation || previous.platformAllocation, version: previous.version + 1, confirmed: true, updatedAt: new Date().toISOString() };
       history.push(config); return { conflict: false, config };
     });
     if (result.conflict) return res.status(409).json({ message: 'มีการแก้สูตรจากหน้าต่างอื่น กรุณารีเฟรชก่อน' });
@@ -139,7 +133,7 @@ export function createFinance(directory = path.resolve('data'), enabled = proces
     if (unit.settlement) return res.status(409).json({ message: 'ยืนยันยอดนี้แล้ว ไม่สร้างใบแบ่งรายได้ซ้ำ' });
     if (unit.deficit || unit.overpaid) return res.status(409).json({ message: 'มีต้นทุนเกินยอดขายหรือจ่ายเกินส่วนแบ่ง ต้องตรวจยอดก่อน' });
     if (req.body.fingerprint !== unit.fingerprint || req.body.configVersion !== state.config.version) return res.status(409).json({ message: 'ยอดหรือสูตรเปลี่ยนไป กรุณารีเฟรชเพื่อตรวจยอดล่าสุด' });
-    const snapshot = { id: randomUUID(), key: unit.key, createdAt: new Date().toISOString(), configVersion: state.config.version, fingerprint: unit.fingerprint, rule: unit.rule, platform: unit.platform, partner: unit.partner, gross: unit.gross, refunds: unit.refunds, directCosts: unit.directCosts, processing: unit.processing, distributable: unit.distributable };
+    const snapshot = { id: randomUUID(), key: unit.key, createdAt: new Date().toISOString(), configVersion: state.config.version, fingerprint: unit.fingerprint, rule: unit.rule, platform: unit.platform, partner: unit.partner, gross: unit.gross, refunds: unit.refunds, directCosts: unit.directCosts, processing: unit.processing, distributable: unit.distributable, platformAllocation: state.config.platformAllocation };
     const inserted = await updateDoc<any[], boolean>('revenue-settlements', settlementFile, [], settlements => {
       if (settlements.some(item => item.key === unit.key)) return false;
       settlements.push(snapshot); return true;
