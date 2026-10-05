@@ -1,0 +1,32 @@
+{
+  "size": { "width": 2500, "height": 1686 },
+  "selected": true,
+  "name": "Chick&Pick player menu v1",
+  "chatBarText": "เมนู Chick&Pick",
+  "areas": [
+    {
+      "bounds": { "x": 20, "y": 180, "width": 806, "height": 730 },
+      "action": { "type": "uri", "label": "หาก๊วน", "uri": "https://liff.line.me/2011829684-nZbaL7lP?organizer=0&view=discover" }
+    },
+    {
+      "bounds": { "x": 847, "y": 180, "width": 806, "height": 730 },
+      "action": { "type": "uri", "label": "ก๊วนของฉัน", "uri": "https://liff.line.me/2011829684-nZbaL7lP?organizer=0&view=tickets" }
+    },
+    {
+      "bounds": { "x": 1674, "y": 180, "width": 806, "height": 730 },
+      "action": { "type": "uri", "label": "เรียนกับโค้ช", "uri": "https://liff.line.me/2011829684-nZbaL7lP?organizer=0&view=coaches" }
+    },
+    {
+      "bounds": { "x": 20, "y": 930, "width": 806, "height": 730 },
+      "action": { "type": "uri", "label": "Court Club", "uri": "https://liff.line.me/2011829684-nZbaL7lP?organizer=0&view=courts" }
+    },
+    {
+      "bounds": { "x": 847, "y": 930, "width": 806, "height": 730 },
+      "action": { "type": "uri", "label": "โปรไฟล์", "uri": "https://liff.line.me/2011829684-nZbaL7lP?organizer=0&view=profile" }
+    },
+    {
+      "bounds": { "x": 1674, "y": 930, "width": 806, "height": 730 },
+      "action": { "type": "message", "label": "แชทหาเรา", "text": "ติดต่อทีมงาน Chick&Pick" }
+    }
+  ]
+}

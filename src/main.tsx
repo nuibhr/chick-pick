@@ -1,12 +1,13 @@
 import { lazy, StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
+import { entryParameters } from './playerNavigation';
 
 const AdminDashboard = lazy(() => import('./AdminEntry.tsx'));
 const WorkspaceGate = lazy(() => import('./WorkspaceGate.tsx'));
 const PlayerApp = lazy(() => import('./PlayerApp.tsx'));
 
-const params = new URLSearchParams(window.location.search);
+const params = entryParameters(window.location.search);
 // Keep the organizer destination through LINE's primary/secondary redirects.
 let organizerIntent = params.get('organizer') === '1';
 try {

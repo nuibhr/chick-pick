@@ -10,10 +10,10 @@ import CoachPreview from './CoachPreview';
 import PlayerHero from './PlayerHero';
 import { PlayerThemeSettings, usePlayerTheme } from './PlayerTheme';
 import { playStyles, sessionPlayStyle, type PlayStyle } from './playerPresentation';
+import { playerTabFromLocation, playerTabUrl, type PlayerTab } from './playerNavigation';
 import './player-app.css';
 
 type BookingView = { transferAccount: TransferAccount | null; id: string; sessionId: string; amount: number; title: string; createdAt: string; paidAt: string | null; admissionStatus: 'pending' | 'approved'; cancelledAt: string | null; receipt: { id: string; status: 'pending' | 'approved' | 'rejected'; ocr: SlipOcr; rejectReason: string | null } | null };
-type PlayerTab = 'discover' | 'courts' | 'coaches' | 'tickets' | 'profile';
 type PlayerConfig = { liffId: string | null; connected: boolean; bookingEnabled: boolean; profileEditingEnabled?: boolean; pilot?: boolean };
 const baht = (n: number) => new Intl.NumberFormat('th-TH', { maximumFractionDigits: 2 }).format(n);
 
@@ -52,10 +52,7 @@ export default function PlayerApp() {
   const [person, setPerson] = useState('');
   const [profile, setProfile] = useState<PlayerProfile | null>(null);
   const [config, setConfig] = useState<PlayerConfig>({ liffId: null, connected: false, bookingEnabled: false });
-  const [tab, setTab] = useState<PlayerTab>(() => {
-    const saved = location.hash.replace('#view-', '');
-    return ['discover', 'courts', 'coaches', 'tickets', 'profile'].includes(saved) ? saved as PlayerTab : 'discover';
-  });
+  const [tab, setTab] = useState<PlayerTab>(() => playerTabFromLocation(location.search, location.hash));
   const [filter, setFilter] = useState<PlayStyle | null>(null);
   const positions = useRef<Partial<Record<PlayerTab, number>>>({});
   useLayoutEffect(() => {
@@ -68,7 +65,10 @@ export default function PlayerApp() {
   const [participantId, setParticipantId] = useState<string | null>(null);
   const participant = (selected ? selected.participants : sessions.flatMap(session => session.participants)).find(p => p.id === participantId);
   useEffect(() => {
-    const fromHash = () => { if (location.hash.startsWith('#player-')) { try { setParticipantId(decodeURIComponent(location.hash.slice(8))); } catch { setParticipantId(null); } } };
+    const fromHash = () => {
+      if (location.hash.startsWith('#view-')) setTab(playerTabFromLocation(location.search, location.hash));
+      if (location.hash.startsWith('#player-')) { try { setParticipantId(decodeURIComponent(location.hash.slice(8))); } catch { setParticipantId(null); } }
+    };
     fromHash(); window.addEventListener('hashchange', fromHash);
     return () => window.removeEventListener('hashchange', fromHash);
   }, []);
@@ -204,7 +204,7 @@ export default function PlayerApp() {
   const navigate = (next: PlayerTab) => {
     positions.current[tab] = window.scrollY;
     setTab(next); setError('');
-    history.replaceState(null, '', location.pathname + location.search + '#view-' + next);
+    history.replaceState(null, '', playerTabUrl(location.pathname, location.search, next));
   };
   const showVenue = (venue: string) => { setFilter(null); setQuery(venue); navigate('discover'); };
 

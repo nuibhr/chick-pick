@@ -1,0 +1,47 @@
+# Chick&Pick Rich Menu
+
+ชุดนี้เตรียมลิงก์และพื้นที่กดสำหรับภาพ `chick-pick-rich-menu-v1.png` ขนาด 2500 × 1686 ยังไม่ได้เผยแพร่ใน LINE OA
+
+## ตั้งค่าใน LINE Official Account Manager
+
+เปิดบัญชี Chick&Pick ใน https://manager.line.biz/ → Rich menus → สร้างเมนูใหม่ → อัปโหลดภาพ → กำหนดพื้นที่กด → ตั้งค่าการแสดงผลและบันทึก
+
+ใช้ Link/URL สำหรับ 5 ช่องแรก และ Text/ข้อความ สำหรับช่องแชท:
+
+| ตำแหน่ง | ปุ่ม | ค่า Action |
+| --- | --- | --- |
+| บนซ้าย | หาก๊วน | https://liff.line.me/2011829684-nZbaL7lP?organizer=0&view=discover |
+| บนกลาง | ก๊วนของฉัน | https://liff.line.me/2011829684-nZbaL7lP?organizer=0&view=tickets |
+| บนขวา | เรียนกับโค้ช | https://liff.line.me/2011829684-nZbaL7lP?organizer=0&view=coaches |
+| ล่างซ้าย | Court Club | https://liff.line.me/2011829684-nZbaL7lP?organizer=0&view=courts |
+| ล่างกลาง | โปรไฟล์ & DUPR | https://liff.line.me/2011829684-nZbaL7lP?organizer=0&view=profile |
+| ล่างขวา | แชทหาเรา | ข้อความ: ติดต่อทีมงาน Chick&Pick |
+
+ปุ่มแชทส่งข้อความเมื่อผู้ใช้กด ไม่ใช่บอตตอบอัตโนมัติ ต้องให้ทีมงานรับข้อความใน OA หรือเตรียมระบบตอบแยกต่างหาก ไม่ต้องใช้ channel access token หากตั้งผ่าน OA Manager
+
+ภาพมีหัวแบรนด์ด้านบน จึงต้องกำหนดพื้นที่ให้ตรงการ์ด แม่แบบแบ่งเท่ากัน 3 × 2 อาจทำให้ส่วนล่างของการ์ดแถวบนกดแล้วไปแถวล่าง ถ้า Manager มีตัวเลือกกำหนดพื้นที่เองให้ใช้พิกัดนี้; ถ้ามีเฉพาะแม่แบบตายตัว ให้ใช้ Messaging API พร้อม JSON ที่เตรียมไว้ หรือปรับภาพให้ตรงแม่แบบก่อนเผยแพร่
+
+| ช่อง | x | y | width | height |
+| --- | ---: | ---: | ---: | ---: |
+| หาก๊วน | 20 | 180 | 806 | 730 |
+| ก๊วนของฉัน | 847 | 180 | 806 | 730 |
+| เรียนกับโค้ช | 1674 | 180 | 806 | 730 |
+| Court Club | 20 | 930 | 806 | 730 |
+| โปรไฟล์ | 847 | 930 | 806 | 730 |
+| แชท | 1674 | 930 | 806 | 730 |
+
+## Messaging API
+
+`chick-pick-rich-menu-v1.json` เป็น body สำหรับ `POST /v2/bot/richmenu` ไม่ใช่ไฟล์นำเข้า OA Manager โดยตรง จากนั้นอัปโหลด PNG ไปที่ `POST https://api-data.line.me/v2/bot/richmenu/{richMenuId}/content` แล้วตั้งเป็นเมนูเริ่มต้นด้วย `POST /v2/bot/user/all/richmenu/{richMenuId}` ต้องใช้ Messaging API channel access token ของ OA นี้เท่านั้น เก็บ server-side ห้ามส่ง token ในแชตหรือ commit ลง Git เมนูที่สร้างด้วย API แก้ผ่าน OA Manager ไม่ได้
+
+## ข้อจำกัดก่อนเผยแพร่
+
+- ตรวจ live `/api/player/config` แล้ว LIFF ID คือ `2011829684-nZbaL7lP`; ยังปิดรับจองใหม่อยู่
+- Court Club เปิดหน้ารวมสนามของผู้เล่น ยังไม่ได้เปิดหน้าจัดคู่/วนคิวจากระบบในเครื่องบน Worker อย่าเชื่อมปุ่มผู้เล่นไปหลังบ้านผู้จัด
+- โปรไฟล์แก้ข้อมูลผู้เล่นได้ แต่ระดับเป็นค่าที่ระบุเอง ยังไม่เชื่อม DUPR จริง จึงควรเปลี่ยนคำบนภาพเป็น “โปรไฟล์ผู้เล่น” และ “ข้อมูลและระดับการเล่น” ก่อนใช้ประชาสัมพันธ์
+- หน้าโค้ชยังเป็นหน้ารอเปิดบริการ ไม่มีการจองเวลาโค้ชจริงบน Worker
+- `organizer=0` เลือกหน้าผู้เล่นและล้างความจำหน้าผู้จัดในเบราว์เซอร์ ไม่ได้เปลี่ยนสิทธิ์บัญชี
+- ต้องทดสอบจาก LINE บนมือถือทั้ง 5 ปุ่มและข้อความแชท การผ่าน build หรือเปิดเว็บตรงไม่ได้ยืนยัน LINE consent/redirect และการเข้าถึง Channel ของผู้เล่นทั่วไป
+- ตรวจเว็บจริงหลัง deploy วันที่ 5 ตุลาคม 2026 แล้ว query `view=coaches` เปิดตารางโค้ชได้ตรงหน้า แต่ browser session ที่ตรวจยังตอบ “ยืนยันตัวตน LINE ไม่สำเร็จ กรุณาเปิดแอปใหม่” จึงยังไม่ถือว่าการล็อกอินใหม่จาก Rich Menu ผ่านแล้ว
+
+เอกสาร LINE: https://developers.line.biz/en/docs/liff/opening-liff-app/ · https://developers.line.biz/en/docs/messaging-api/actions/ · https://developers.line.biz/en/docs/messaging-api/using-rich-menus/
