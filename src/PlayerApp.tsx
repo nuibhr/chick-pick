@@ -6,21 +6,23 @@ import {
 } from 'lucide-react';
 import type { PublicSession, PublicParticipant, PlayerProfile, TransferAccount, SlipOcr } from './marketplaceTypes';
 import { ParticipantDialog, ParticipantPreview, PlayerAvatar, PlayerDialog, ProfileEditor } from './PlayerParticipants';
-import CoachPreview from './CoachPreview';
+import CoachPreview from './PlayerCoaches';
 import PlayerHero from './PlayerHero';
 import { PlayerThemeSettings, usePlayerTheme } from './PlayerTheme';
 import { playStyles, sessionPlayStyle, type PlayStyle } from './playerPresentation';
 import { playerTabFromLocation, playerTabUrl, type PlayerTab } from './playerNavigation';
+import { initializeLine, reauthenticateLine } from './lineSession';
+import type { Venue } from './venueTypes';
 import './player-app.css';
 
-type BookingView = { transferAccount: TransferAccount | null; id: string; sessionId: string; amount: number; title: string; createdAt: string; paidAt: string | null; admissionStatus: 'pending' | 'approved'; cancelledAt: string | null; receipt: { id: string; status: 'pending' | 'approved' | 'rejected'; ocr: SlipOcr; rejectReason: string | null } | null };
+type BookingView = { holdExpiresAt?: string | null; kind?: 'game' | 'coaching'; startsAt?: string; venue?: string; completed?: boolean; transferAccount: TransferAccount | null; id: string; sessionId: string; amount: number; title: string; createdAt: string; paidAt: string | null; admissionStatus: 'pending' | 'approved'; cancelledAt: string | null; receipt: { id: string; status: 'pending' | 'approved' | 'rejected'; ocr: SlipOcr; rejectReason: string | null } | null };
 type PlayerConfig = { liffId: string | null; connected: boolean; bookingEnabled: boolean; profileEditingEnabled?: boolean; pilot?: boolean };
 const baht = (n: number) => new Intl.NumberFormat('th-TH', { maximumFractionDigits: 2 }).format(n);
 
 async function api<T>(route: string, init?: RequestInit): Promise<T> {
   const response = await fetch('/api/player' + route, init);
   const value = await response.json();
-  if (!response.ok) throw Error(value.message || 'เชื่อมต่อไม่สำเร็จ');
+  if (!response.ok) throw Object.assign(Error(value.message || 'เชื่อมต่อไม่สำเร็จ'), { status: response.status });
   return value as T;
 }
 
@@ -47,6 +49,8 @@ function SessionCard({ session, index, open, openProfile }: { session: PublicSes
 
 export default function PlayerApp() {
   const [sessions, setSessions] = useState<PublicSession[]>([]);
+  const [registeredVenues, setRegisteredVenues] = useState<Venue[]>([]);
+  const [needsAuth, setNeedsAuth] = useState(false);
   const [bookings, setBookings] = useState<BookingView[]>([]);
   const [token, setToken] = useState('');
   const [person, setPerson] = useState('');
@@ -78,6 +82,7 @@ export default function PlayerApp() {
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const handleUnauthorized = (cause: unknown) => { if ((cause as { status?: number })?.status === 401) { setNeedsAuth(true); setToken(''); setProfile(null); setPerson(''); setBookings([]); } };
 
   useEffect(() => {
     let active = true;
@@ -89,7 +94,7 @@ export default function PlayerApp() {
         if (!settings.liffId) return;
         try {
           const { default: liff } = await import('@line/liff');
-          await liff.init({ liffId: settings.liffId });
+          await initializeLine(liff, settings.liffId);
           if (!active || !liff.isLoggedIn()) return;
           const idToken = liff.getIDToken();
           if (!idToken) throw Error('ยังไม่ได้รับสิทธิ์ยืนยันตัวตน กรุณาปิดแล้วเปิด MINI App ใหม่');
@@ -100,13 +105,15 @@ export default function PlayerApp() {
           ]);
           if (active) { setToken(idToken); setPerson(me.name); setProfile(me.profile); setBookings(own.bookings); }
         } catch (cause) {
-          if (active) setError('เชื่อม LINE ไม่สำเร็จ: ' + (cause as Error).message);
+          if (active) { handleUnauthorized(cause); setError('เชื่อม LINE ไม่สำเร็จ: ' + (cause as Error).message); }
         }
       })
       .catch(cause => { if (active) setError((cause as Error).message); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => { const controller = new AbortController(); fetch('/api/venues', { signal: controller.signal }).then(async r => { if (r.ok) setRegisteredVenues((await r.json()).venues); }).catch(() => {}); return () => controller.abort(); }, []);
 
   useEffect(() => {
     let active = true;
@@ -116,6 +123,20 @@ export default function PlayerApp() {
     return () => { active = false; window.clearInterval(timer); window.removeEventListener('focus', refresh); };
   }, []);
 
+  useEffect(() => {
+    if (!token) return;
+    let active = true;
+    const refresh = () => {
+      if (document.visibilityState !== 'visible') return;
+      void api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } })
+        .then(own => { if (active) setBookings(own.bookings); })
+        .catch(cause => { if (active) { handleUnauthorized(cause); setError((cause as Error).message); } });
+    };
+    const timer = window.setInterval(refresh, 30000);
+    window.addEventListener('focus', refresh);
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener('focus', refresh); };
+  }, [token]);
+
   const saveProfile = async (value: PlayerProfile) => {
     if (!token || busy || !canEditProfile) return;
     setBusy(true); setError('');
@@ -124,7 +145,7 @@ export default function PlayerApp() {
       setProfile(result.profile);
       setNotice(result.profile.discoverable ? 'บันทึกแล้ว เพื่อนเห็นโปรไฟล์หลังผู้จัดรับเข้าสนาม' : 'บันทึกแล้ว ซ่อนโปรไฟล์จากหน้าก๊วน');
       void api<{ sessions: PublicSession[] }>('/sessions').then(catalog => setSessions(catalog.sessions)).catch(() => {});
-    } catch (cause) { setError((cause as Error).message); }
+    } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); }
     finally { setBusy(false); }
   };
 
@@ -133,7 +154,8 @@ export default function PlayerApp() {
     setBusy(true); setError('');
     try {
       const { default: liff } = await import('@line/liff');
-      await liff.init({ liffId: config.liffId });
+      await initializeLine(liff, config.liffId);
+      if (needsAuth) { const result = reauthenticateLine(liff, location.origin + playerTabUrl('/miniapp', '?organizer=0', tab)); if (result === 'reopen') setError('ปิดหน้าต่างนี้ แล้วเปิดจาก Rich Menu อีกครั้งเพื่อรับสิทธิ์ LINE ใหม่'); return; }
       if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }
       const idToken = liff.getIDToken();
       if (!idToken) throw Error('ยังไม่ได้รับสิทธิ์ยืนยันตัวตน กรุณาปิดแล้วเปิด MINI App ใหม่');
@@ -143,7 +165,8 @@ export default function PlayerApp() {
         api<{ bookings: BookingView[] }>('/bookings', { headers }),
       ]);
       setToken(idToken); setPerson(me.name); setProfile(me.profile); setBookings(own.bookings);
-    } catch (cause) { setError((cause as Error).message); }
+      setNeedsAuth(false);
+    } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); }
     finally { setBusy(false); }
   };
 
@@ -163,7 +186,7 @@ export default function PlayerApp() {
       setBookings(own.bookings); setSessions(catalog.sessions);
       setNotice(result.repeated ? 'คุณมีการจองก๊วนนี้อยู่แล้ว' : result.message);
       setSelectedId(null); setTab('tickets');
-    } catch (cause) { setError((cause as Error).message); }
+    } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); }
     finally { setBusy(false); }
   };
 
@@ -171,13 +194,13 @@ export default function PlayerApp() {
     if (!token || busy || !window.confirm('ยกเลิกการจองนี้และคืนที่นั่งให้ก๊วน?')) return;
     setBusy(true); setError('');
     try {
-      await api('/bookings/' + encodeURIComponent(booking.id) + '/cancel', { method: 'POST', headers: { Authorization: 'Bearer ' + token } });
+      await api((booking.kind === 'coaching' ? '/lessons/' : '/bookings/') + encodeURIComponent(booking.id) + '/cancel', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: '{}' });
       const [own, catalog] = await Promise.all([
         api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } }),
         api<{ sessions: PublicSession[] }>('/sessions'),
       ]);
       setBookings(own.bookings); setSessions(catalog.sessions); setNotice('ยกเลิกการจองแล้ว ที่นั่งกลับมาเปิดรับ');
-    } catch (cause) { setError((cause as Error).message); }
+    } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); }
     finally { setBusy(false); }
   };
 
@@ -186,10 +209,10 @@ export default function PlayerApp() {
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) { setError('เลือกภาพ JPG, PNG หรือ WebP ขนาดไม่เกิน 5 MB'); return; }
     setBusy(true); setError('');
     try {
-      await api('/bookings/' + encodeURIComponent(booking.id) + '/receipt', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': file.type }, body: file });
+      await api((booking.kind === 'coaching' ? '/lessons/' : '/bookings/') + encodeURIComponent(booking.id) + '/receipt', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': file.type }, body: file });
       const own = await api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } });
       setBookings(own.bookings); setNotice('ส่งสลิปแล้ว รอแอดมินตรวจสอบ');
-    } catch (cause) { setError((cause as Error).message); }
+    } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); }
     finally { setBusy(false); }
   };
 
@@ -200,7 +223,7 @@ export default function PlayerApp() {
     .sort((a, b) => Date.parse(a.startsAt) - Date.parse(b.startsAt)), [sessions, filter, query]);
   const upcoming = sessions.filter(session => session.status !== 'completed');
   const openSeats = upcoming.reduce((sum, session) => sum + Math.max(0, session.capacity - session.joined), 0);
-  const venues = [...new Map(upcoming.map(session => [session.venue, session])).values()];
+  const venues = [...new Map([...upcoming.map(s => [s.venue, { venue: s.venue, area: s.area }] as const), ...registeredVenues.map(v => [v.name, { venue: v.name, area: v.area }] as const)]).values()];
   const navigate = (next: PlayerTab) => {
     positions.current[tab] = window.scrollY;
     setTab(next); setError('');
@@ -223,6 +246,7 @@ export default function PlayerApp() {
     <main className="pa-main" id="player-content">
       {notice && <p className="pa-message pa-success" role="status"><Check size={17} />{notice}</p>}
       {error && <p className="pa-message pa-error" role="alert"><Info size={17} />{error}</p>}
+      {needsAuth && <button type="button" className="pa-auth-retry" disabled={busy} onClick={login}>เข้าสู่ LINE ใหม่</button>}
 
       {tab === 'discover' && <>
         <div className="pa-welcome">
@@ -249,13 +273,13 @@ export default function PlayerApp() {
         }) : <div className="pa-empty"><MapPinned size={28} /><b>ยังไม่มีสนามที่เปิดก๊วน</b><p>ก๊วนใหม่จะแสดงที่นี่เมื่อผู้จัดเปิดรับ</p></div>}</div>
       </>}
 
-      {tab === 'coaches' && <CoachPreview />}
+      {tab === 'coaches' && <CoachPreview unauthorized={() => handleUnauthorized({status: 401})} token={token} login={login} booked={async () => { const own = await api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } }); setBookings(own.bookings); setNotice('จองเวลาเรียนแล้ว แนบสลิปและรอผู้จัดตรวจเงิน'); navigate('tickets'); }} />}
 
       {tab === 'tickets' && <>
         <div className="pa-page-intro"><span>MY COURT TIME</span><h1>การจองของฉัน<span>.</span></h1><p>{token ? 'ก๊วนที่ผูกกับบัญชี LINE ของคุณ' : 'เชื่อม LINE เพื่อดูการจองของตัวเอง'}</p></div>
         {!token ? <div className="pa-state-card"><span><LockKeyhole size={27} /></span><h2>การจองอยู่ในบัญชีของคุณ</h2><p>เมื่อเชื่อม LINE แล้ว จะแสดงเฉพาะก๊วนที่คุณจองไว้</p>{config.connected ? <button type="button" onClick={login}>เชื่อม LINE <ArrowRight size={17} /></button> : <small>LINE Mini App ยังไม่ได้ตั้งค่า</small>}</div> : bookings.length ? <div className="pa-ticket-list">{bookings.map(booking => {
           const session = sessions.find(item => item.id === booking.sessionId);
-          return <article className="pa-ticket" key={booking.id}><div className="pa-ticket-head"><span><Ticket size={16} /> COURT PASS</span><span className={booking.admissionStatus === 'approved' ? 'paid' : ''}>{booking.cancelledAt ? 'ยกเลิกแล้ว' : booking.admissionStatus === 'approved' ? 'ผู้จัดรับเข้าสนามแล้ว' : booking.paidAt ? 'ตรวจเงินแล้ว · รอผู้จัดเลือกเข้าสนาม' : booking.receipt?.status === 'pending' ? 'ส่งสลิปแล้ว · รอตรวจ' : booking.receipt?.status === 'rejected' ? 'สลิปไม่ผ่าน · ส่งใหม่ได้' : 'ยังไม่ชำระเงิน'}</span></div><div className="pa-ticket-main"><small>{session?.date || 'วันที่ก๊วน'} · {session?.time || 'ดูรายละเอียดกับผู้จัด'}</small><h2>{booking.title}</h2><p><MapPin size={14} />{session?.venue || 'รายละเอียดสนาม'}</p></div><div className="pa-ticket-foot"><span>เลขจอง <b>{booking.id.slice(0, 8).toUpperCase()}</b></span><strong>฿{baht(booking.amount / 100)}</strong></div>{!booking.cancelledAt && !booking.paidAt && <div className="pa-transfer-instructions"><b>{config.pilot ? "บัญชีสำหรับโอนยอดจองนี้" : "ข้อมูลสำหรับทดลองส่งสลิป"}</b>{booking.transferAccount ? <><span>{booking.transferAccount.bankName} · {booking.transferAccount.accountName}</span><strong>{booking.transferAccount.accountNumber}</strong></> : <span>ผู้จัดยังไม่ได้ตั้งบัญชีสำหรับรายการนี้</span>}<small>{config.pilot ? "โอนตามยอดจอง แนบสลิป แล้วรอผู้จัดตรวจเงิน การตรวจสลิปยังไม่ถือว่าได้รับเลือกเข้าสนาม" : "ยังไม่เปิดรับเงินจริง ใช้ภาพทดสอบเท่านั้น แอดมินจะตรวจสลิปก่อนยืนยัน"}</small></div>}{booking.receipt?.rejectReason && <p className="pa-slip-note" role="alert">แอดมินแจ้ง: {booking.receipt.rejectReason}</p>}{booking.receipt?.ocr.status === 'complete' && <details className="pa-slip-ocr"><summary>ข้อมูลที่ OCR อ่านได้ · กรุณาตรวจความถูกต้อง</summary><pre>{JSON.stringify(booking.receipt.ocr, null, 2)}</pre></details>}{booking.receipt?.ocr.status === 'failed' && <p className="pa-slip-note">OCR อ่านภาพไม่สำเร็จ แอดมินยังตรวจภาพสลิปได้</p>}{!booking.cancelledAt && !booking.paidAt && booking.receipt?.status !== 'pending' && <label className="pa-slip-upload">{busy ? 'กำลังส่งสลิป…' : booking.receipt?.status === 'rejected' ? 'ถ่ายรูปหรือเลือกสลิปใหม่' : 'ถ่ายรูปหรือแนบสลิปโอนเงิน'}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={event => { void uploadReceipt(booking, event.target.files?.[0]); event.target.value = ''; }} /></label>}{!booking.cancelledAt && !booking.paidAt && booking.receipt?.status !== 'pending' && booking.admissionStatus !== 'approved' && session && Date.parse(session.startsAt) > Date.now() && <button type="button" className="pa-cancel-booking" disabled={busy} onClick={() => cancelBooking(booking)}>ยกเลิกการจอง</button>}</article>;
+          return <article className="pa-ticket" key={booking.id}><div className="pa-ticket-head"><span><Ticket size={16} /> {booking.kind === 'coaching' ? 'COACH PASS' : 'COURT PASS'}</span><span className={booking.admissionStatus === 'approved' ? 'paid' : ''}>{booking.cancelledAt ? 'ยกเลิกแล้ว' : booking.kind === 'coaching' && booking.paidAt ? booking.completed ? 'เรียนจบแล้ว' : 'ตรวจเงินแล้ว · ยืนยันนัดเรียน' : booking.admissionStatus === 'approved' ? 'ผู้จัดรับเข้าสนามแล้ว' : booking.paidAt ? 'ตรวจเงินแล้ว · รอผู้จัดเลือกเข้าสนาม' : booking.receipt?.status === 'pending' ? 'ส่งสลิปแล้ว · รอตรวจ' : booking.receipt?.status === 'rejected' ? 'สลิปไม่ผ่าน · ส่งใหม่ได้' : 'ยังไม่ชำระเงิน'}</span></div><div className="pa-ticket-main"><small>{booking.kind === 'coaching' && booking.startsAt ? new Date(booking.startsAt).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' }) : (session?.date || 'วันที่ก๊วน') + ' · ' + (session?.time || 'ดูรายละเอียดกับผู้จัด')}</small><h2>{booking.title}</h2><p><MapPin size={14} />{booking.venue || session?.venue || 'รายละเอียดสนาม'}</p></div><div className="pa-ticket-foot"><span>เลขจอง <b>{booking.id.slice(0, 8).toUpperCase()}</b></span><strong>฿{baht(booking.amount / 100)}</strong></div>{!booking.cancelledAt && !booking.paidAt && <div className="pa-transfer-instructions"><b>{config.pilot ? "บัญชีสำหรับโอนยอดจองนี้" : "ข้อมูลสำหรับทดลองส่งสลิป"}</b>{booking.transferAccount ? <><span>{booking.transferAccount.bankName} · {booking.transferAccount.accountName}</span><strong>{booking.transferAccount.accountNumber}</strong></> : <span>ผู้จัดยังไม่ได้ตั้งบัญชีสำหรับรายการนี้</span>}<small>{booking.kind === 'coaching' ? "โอนและแนบสลิปภายใน 30 นาที เมื่อส่งสลิปแล้วระบบจะกันเวลาไว้ระหว่างแอดมินตรวจเงิน" : config.pilot ? "โอนตามยอดจอง แนบสลิป แล้วรอผู้จัดตรวจเงิน การตรวจสลิปยังไม่ถือว่าได้รับเลือกเข้าสนาม" : "ยังไม่เปิดรับเงินจริง ใช้ภาพทดสอบเท่านั้น แอดมินจะตรวจสลิปก่อนยืนยัน"}</small></div>}{booking.receipt?.rejectReason && <p className="pa-slip-note" role="alert">แอดมินแจ้ง: {booking.receipt.rejectReason}</p>}{booking.receipt?.ocr.status === 'complete' && <details className="pa-slip-ocr"><summary>ข้อมูลที่ OCR อ่านได้ · กรุณาตรวจความถูกต้อง</summary><pre>{JSON.stringify(booking.receipt.ocr, null, 2)}</pre></details>}{booking.receipt?.ocr.status === 'failed' && <p className="pa-slip-note">OCR อ่านภาพไม่สำเร็จ แอดมินยังตรวจภาพสลิปได้</p>}{!booking.cancelledAt && !booking.paidAt && booking.receipt?.status !== 'pending' && <label className="pa-slip-upload">{busy ? 'กำลังส่งสลิป…' : booking.receipt?.status === 'rejected' ? 'ถ่ายรูปหรือเลือกสลิปใหม่' : 'ถ่ายรูปหรือแนบสลิปโอนเงิน'}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={event => { void uploadReceipt(booking, event.target.files?.[0]); event.target.value = ''; }} /></label>}{!booking.cancelledAt && !booking.paidAt && booking.receipt?.status !== 'pending' && booking.admissionStatus !== 'approved' && Date.parse(booking.startsAt || session?.startsAt || '') > Date.now() && <button type="button" className="pa-cancel-booking" disabled={busy} onClick={() => cancelBooking(booking)}>ยกเลิกการจอง</button>}</article>;
         })}</div> : <div className="pa-empty"><Ticket size={28} /><b>ยังไม่มีการจอง</b><p>เริ่มจากเลือกก๊วนที่อยากไปเล่น</p><button type="button" onClick={() => navigate('discover')}>ไปหาก๊วน <ArrowRight size={15} /></button></div>}
       </>}
 
@@ -264,7 +288,7 @@ export default function PlayerApp() {
         <section className="pa-profile-card"><div className="pa-profile-mark">{profile ? <PlayerAvatar person={profile} large /> : <UserRound size={32} />}</div><span className="pa-profile-state">{person ? <><Check size={13} /> เชื่อม LINE แล้ว</> : 'PLAYER PROFILE'}</span><h2>{person || 'ผู้เล่นคนใหม่'}</h2><p>{person ? 'พร้อมเจอกันที่สนาม' : 'เชื่อม LINE เพื่อเก็บการจองไว้กับบัญชีของคุณ'}</p>{config.connected && !token && <button type="button" onClick={login}>เชื่อมบัญชี LINE <ArrowRight size={16} /></button>}</section>
         {profile && <ProfileEditor profile={profile} busy={busy} enabled={canEditProfile} save={saveProfile} />}
         <PlayerThemeSettings preference={preference} choose={choose} />
-        <div className="pa-profile-stats"><span><b>{bookings.length}</b><small>ก๊วนที่จอง</small></span><span><b>{bookings.filter(booking => booking.paidAt).length}</b><small>ยืนยันรับเงิน</small></span></div>
+        <div className="pa-profile-stats"><span><b>{bookings.length}</b><small>การจองทั้งหมด</small></span><span><b>{bookings.filter(booking => booking.paidAt).length}</b><small>ยืนยันรับเงิน</small></span></div>
         <section className="pa-profile-guide"><h2>เริ่มเล่นง่าย ๆ</h2><div><span>01</span><p><b>เลือกก๊วน</b><small>ดูสนาม เวลา และระดับที่เหมาะกับคุณ</small></p></div><div><span>02</span><p><b>จองผ่าน LINE</b><small>ใช้บัญชีของคุณเพื่อเก็บรายการจอง</small></p></div><div><span>03</span><p><b>เจอกันที่สนาม</b><small>ตรวจรายละเอียดกับผู้จัดก่อนเดินทาง</small></p></div></section>
         <div className="pa-integrity"><ShieldCheck size={18} /><span>{config.pilot ? "ตรวจเงินโดยผู้จัด ไม่มีการตัดเงินหรือคืนเงินอัตโนมัติ" : "ระบบจองและยอดเงินยังอยู่ในโหมดทดลอง"}</span></div>
       </>}

@@ -1,21 +1,22 @@
 import { categories, type FinanceRow } from '../src/financeTypes';
 import { financeRows, summarize, thaiDate, validDate } from '../src/financeModel';
 import { buildRevenueUnits, defaultRevenueConfig } from '../src/revenueMath';
-import type { Enrollment } from '../src/coachingTypes';
+import type { Coach, CoachSlot, Enrollment } from '../src/coachingTypes';
 import type { MarketplaceData } from '../src/marketplaceTypes';
 import type { PlatformAllocation, RevenueConfig, RevenueReport, RevenueUnit } from '../src/revenueTypes';
 import { digest } from './pilotAuth';
 import { fail } from './pilotDomain';
 
 export type Snapshot = NonNullable<RevenueUnit['settlement']> & { key: string; rule: RevenueUnit['rule']; platformAllocation?: PlatformAllocation };
-export type FinanceDocuments = { marketplace: MarketplaceData; finance: FinanceRow[]; coaching: Enrollment[]; 'revenue-config': RevenueConfig[]; 'revenue-settlements': Snapshot[] };
-export const financeKeys = ['marketplace', 'coaching', 'finance', 'revenue-config', 'revenue-settlements'] as const;
+export type FinanceDocuments = { marketplace: MarketplaceData; finance: FinanceRow[]; coaching: Enrollment[]; 'coach-profiles'?: Coach[]; 'coach-slots'?: CoachSlot[]; 'revenue-config': RevenueConfig[]; 'revenue-settlements': Snapshot[] };
+export const financeKeys = ['marketplace', 'coaching', 'finance', 'revenue-config', 'revenue-settlements', 'coach-profiles', 'coach-slots'] as const;
 export const allRows = (docs: FinanceDocuments) => financeRows(docs.finance, docs.coaching, docs.marketplace);
 import { platformDistribution, type PlatformDistribution } from '../src/revenueMath';
 export { platformDistribution } from '../src/revenueMath';
 export async function revenueReport(docs: FinanceDocuments): Promise<RevenueReport & { platformDistribution: PlatformDistribution; pilot: true }> {
   const history = docs['revenue-config'], config = history.at(-1) || defaultRevenueConfig, rows = allRows(docs);
-  const units = await Promise.all(buildRevenueUnits(rows, config, s => s).map(async u => {
+  const fixedFees = Object.fromEntries(docs.coaching.filter(e => e.bookingFee !== undefined).map(e => ['coaching:' + e.id, Math.round(e.bookingFee! * 100)]));
+  const units = await Promise.all(buildRevenueUnits(rows, config, s => s, fixedFees).map(async u => {
     const unit = { ...u, fingerprint: await digest(u.fingerprint) }, saved = docs['revenue-settlements'].find(s => s.key === u.key);
     if (!saved) return unit;
     return { ...unit, rule: saved.rule, settlement: saved, changed: saved.fingerprint !== unit.fingerprint, gross: saved.gross, refunds: saved.refunds, directCosts: saved.directCosts, processing: saved.processing, distributable: saved.distributable, platform: saved.platform, partner: saved.partner, remainingPartner: Math.max(0, saved.partner - unit.paidPartner - unit.pendingPartner), overpaid: Math.max(0, unit.paidPartner + unit.pendingPartner - saved.partner) };
@@ -42,7 +43,7 @@ export function csv(rows: FinanceRow[]) {
   return '\uFEFF'+lines.map(r=>r.map(cell).join(',')).join('\r\n');
 }
 export function configure(docs: FinanceDocuments, v: Record<string, unknown>) {
-  const valid=(r:any)=>r && ['gross','margin'].includes(r.basis)&&['platformBps','processingBps'].every(k=>Number.isInteger(r[k])&&r[k]>=0&&r[k]<=10000);
+  const valid=(r:any)=>r && r.platformFixedSatang === undefined && ['gross','margin'].includes(r.basis)&&['platformBps','processingBps'].every(k=>Number.isInteger(r[k])&&r[k]>=0&&r[k]<=10000);
   if(!valid(v.game)||!valid(v.coaching))fail(400,'ตั้งสูตรและอัตรา 0–100% ให้ครบ');
   const previous=docs['revenue-config'].at(-1)||defaultRevenueConfig;
   if(v.expectedVersion!==previous.version)fail(409,'สูตรเปลี่ยนจากหน้าต่างอื่น กรุณารีเฟรช');
@@ -53,11 +54,12 @@ export function configure(docs: FinanceDocuments, v: Record<string, unknown>) {
 }
 export async function settle(docs: FinanceDocuments, v:Record<string,unknown>) {
   const state=await revenueReport(docs),unit=state.units.find(u=>u.key===v.key);
-  if(!state.config.confirmed||!unit)fail(400,'บันทึกสูตรส่วนแบ่งและเลือกรายการก่อน');
+  if(!unit || !state.config.confirmed && unit.rule.platformFixedSatang === undefined)fail(400,'บันทึกสูตรส่วนแบ่งหรือค่าหัวคิวและเลือกรายการก่อน');
   if(unit.settlement)fail(409,'ปิดยอดนี้แล้ว ไม่สร้างใบซ้ำ');
   if(unit.deficit||unit.overpaid)fail(409,'มีต้นทุนหรือยอดจ่ายเกินส่วนแบ่ง ต้องตรวจยอด');
   if(v.fingerprint!==unit.fingerprint||v.configVersion!==state.config.version)fail(409,'ยอดหรือสูตรเปลี่ยน กรุณารีเฟรช');
   if(unit.kind==='game'&&docs.marketplace.bookings.some(b=>`game:${b.sessionId}`===unit.key&&!b.cancelledAt&&(!b.paidAt||b.receipts?.at(-1)?.status==='pending')))fail(409,'ยังมีการจองหรือสลิปรอตรวจ จัดการให้ครบก่อนปิดยอด');
+  if(unit.kind==='coaching'&&docs.coaching.some(e=>`coaching:${e.id}`===unit.key&&!e.cancelledAt&&(!e.paidAt||e.receipts?.at(-1)?.status==='pending'||e.lessons.some(l=>l.status==='scheduled'))))fail(409,'เรียนให้ครบและจัดการสลิปก่อนปิดยอดโค้ช');
   const snapshot:Snapshot={id:crypto.randomUUID(),key:unit.key,createdAt:new Date().toISOString(),configVersion:state.config.version,fingerprint:unit.fingerprint,rule:structuredClone(unit.rule),platform:unit.platform,partner:unit.partner,gross:unit.gross,refunds:unit.refunds,directCosts:unit.directCosts,processing:unit.processing,distributable:unit.distributable,platformAllocation:structuredClone(state.config.platformAllocation)};
   docs['revenue-settlements'].push(snapshot); return snapshot;
 }

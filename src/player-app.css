@@ -350,3 +350,4 @@ html[data-player-theme="dark"], html[data-player-theme="dark"] body { background
 .player-app[data-theme="dark"] .cp-day-list button[aria-pressed="true"] { background: var(--pa-accent); color: #152b1d; }
 .player-app[data-theme="dark"] .cp-notice { background: #403625; color: #ead3a6; }
 @media (prefers-reduced-motion: reduce) { .pa-hero > img, .pa-hero-orbit { transform: none !important; } }
+.pa-auth-retry{padding:12px 18px;border:0;border-radius:12px;background:#b8f23a;color:#14251e;font-weight:700;margin-bottom:16px}

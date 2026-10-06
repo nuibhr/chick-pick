@@ -54,7 +54,14 @@ export function authorize(role: AdminRole, path: string, method: string) {
     || (path === '/api/finance/revenue/settle' || /^\/api\/finance\/entries(?:\/[^/]+)?$/.test(path)) && method === 'POST' && p.financeWrite
     || /^\/api\/marketplace\/?$/.test(path) && method === 'GET' && p.receipts
     || path === '/api/marketplace/sessions' && method === 'POST' && p.operations
+    || /^\/api\/marketplace\/venues(?:\/[^/]+)?$/.test(path) && p.operations
     || /^\/api\/marketplace\/bookings\/[^/]+\/receipts\/[^/]+(?:\/review)?$/.test(path) && p.receipts
-    || /^\/api\/marketplace\/bookings\/[^/]+\/admission$/.test(path) && method === 'POST' && p.operations;
+    || /^\/api\/marketplace\/bookings\/[^/]+\/admission$/.test(path) && method === 'POST' && p.operations
+    || /^\/api\/marketplace\/bookings\/[^/]+\/cancel$/.test(path) && method === 'POST' && p.operations
+    || path === '/api/coaching' && method === 'GET' && p.receipts
+    || /^\/api\/coaching\/(coaches|slots)(?:\/[^/]+)?$/.test(path) && method === 'POST' && p.operations
+    || /^\/api\/coaching\/enrollments\/[^/]+\/(cancel|complete)$/.test(path) && method === 'POST' && p.operations
+    || /^\/api\/coaching\/enrollments\/[^/]+\/receipts\/[^/]+$/.test(path) && method === 'GET' && p.receipts
+    || /^\/api\/coaching\/enrollments\/[^/]+\/receipts\/[^/]+\/review$/.test(path) && method === 'POST' && p.receipts;
   if (!allowed) fail(403, 'ระดับแอดมินของคุณไม่มีสิทธิ์ใช้เมนูหรือคำสั่งนี้');
 }

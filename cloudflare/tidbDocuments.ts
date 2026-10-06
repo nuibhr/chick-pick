@@ -1,8 +1,7 @@
 import { connect } from '@tidbcloud/serverless';
 import type { MarketplaceData, TransferAccount } from '../src/marketplaceTypes';
 import type { PilotContext } from './pilotDomain';
-import type { FinanceDocuments } from './financeDomain';
-const financeKeys = ['marketplace', 'coaching', 'finance', 'revenue-config', 'revenue-settlements'] as const;
+import { financeKeys, type FinanceDocuments } from './financeDomain';
 
 export type Audit = { actorId: string; action: string; entityId: string; actorType?: 'admin' | 'line'; entityType?: string };
 
@@ -33,7 +32,7 @@ export class TidbDocuments {
   }
 
   async readFinance(): Promise<FinanceDocuments> {
-    const rows = (await this.db.execute('SELECT document_key, payload FROM app_documents WHERE document_key IN (?, ?, ?, ?, ?)', [...financeKeys])).rows as Row[] | null;
+    const rows = (await this.db.execute(`SELECT document_key, payload FROM app_documents WHERE document_key IN (${financeKeys.map(() => '?').join(',')})`, [...financeKeys])).rows as Row[] | null;
     return this.financeDocuments(rows || []);
   }
 
@@ -44,19 +43,23 @@ export class TidbDocuments {
     return structuredClone(values) as FinanceDocuments;
   }
 
-  async updateFinance<T>(mutate: (docs: FinanceDocuments) => T | Promise<T>, audit: Audit): Promise<T> {
+  async updateFinance<T>(mutate: (docs: FinanceDocuments, context: PilotContext) => T | Promise<T>, audit: Audit): Promise<T> {
     const tx = await this.db.begin();
     try {
       // Same first lock as booking and receipt mutations, then sorted financial rows.
       const market = (await tx.execute('SELECT document_key, payload FROM app_documents WHERE document_key = ? FOR UPDATE', ['marketplace'])).rows as Row[] | null;
       if (!market?.length) throw Error('Missing marketplace');
       for (const key of financeKeys.filter(k => k !== 'marketplace')) await tx.execute('INSERT IGNORE INTO app_documents (document_key, payload) VALUES (?, ?)', [key, '[]']);
-      const rows = (await tx.execute('SELECT document_key, payload FROM app_documents WHERE document_key IN (?, ?, ?, ?) ORDER BY document_key FOR UPDATE', ['coaching', 'finance', 'revenue-config', 'revenue-settlements'])).rows as Row[] | null;
+      const remaining = financeKeys.filter(k => k !== 'marketplace');
+      const rows = (await tx.execute(`SELECT document_key, payload FROM app_documents WHERE document_key IN (${remaining.map(() => '?').join(',')}) ORDER BY document_key FOR UPDATE`, [...remaining])).rows as Row[] | null;
       const docs = this.financeDocuments([...market, ...(rows || [])]);
+      const settingsRows = (await tx.execute('SELECT document_key, payload FROM app_documents WHERE document_key IN (?, ?) ORDER BY document_key FOR UPDATE', ['transfer-account', 'worker-pilot'])).rows as Row[] | null;
+      const settings = new Map((settingsRows || []).map(row => [String(row.document_key), typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload]));
+      const context: PilotContext = { enabled: settings.get('worker-pilot')?.bookingEnabled === true, account: settings.get('transfer-account') || null, closed: docs['revenue-settlements'].map(s => s.key) };
       const before = new Map(financeKeys.map(key => [key, JSON.stringify(docs[key])]));
-      const result = await mutate(docs);
+      const result = await mutate(docs, context);
       for (const key of financeKeys) if (JSON.stringify(docs[key]) !== before.get(key)) await tx.execute('UPDATE app_documents SET payload = ?, version = version + 1 WHERE document_key = ?', [JSON.stringify(docs[key]), key]);
-      await tx.execute('INSERT INTO audit_events (id, actor_type, actor_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?)', [crypto.randomUUID(), 'admin', audit.actorId, audit.action, audit.entityType || 'finance', audit.entityId, null]);
+      await tx.execute('INSERT INTO audit_events (id, actor_type, actor_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?)', [crypto.randomUUID(), audit.actorType || 'admin', audit.actorId, audit.action, audit.entityType || 'finance', audit.entityId, null]);
       await tx.commit(); return result;
     } catch (e) { await tx.rollback(); throw e; }
   }

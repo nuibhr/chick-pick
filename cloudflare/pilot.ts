@@ -4,6 +4,9 @@ import { adminCookie, authenticateAdmin, clearAdminCookie, digest, limitAuth, or
 import { admit, book, cancel, fail, newSession, PilotError, receiptEligibility, review, submitReceipt, transferAccount, unavailableOcr, type Actor } from './pilotDomain';
 import { configure, createEntry, csv, report, revenueReport, settle, updateEntry } from './financeDomain';
 import { authorize, changeMember, claim, emptyTeam, invite, publicTeam, teamKey, type Team, type Member } from './adminTeam';
+import { bookLesson, cancelLesson, changeCoachSlot, coachAdmin, coachCatalog, completeLesson, createCoachSlot, lessonReceiptEligibility, lessonView, reviewLessonReceipt, saveCoach, submitLessonReceipt } from './coachingDomain';
+import { saveVenue } from './venues';
+import type { Venue } from '../src/venueTypes';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
 export type PilotEnv = { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
@@ -36,13 +39,21 @@ const audit = (actor: Actor, action: string, entityId: string, admin = false): A
 export async function pilotRequest(request: Request, env: PilotEnv, verify: Verify): Promise<Response | null> {
   const path = new URL(request.url).pathname;
   const playerMutation = path === '/api/player/bookings' && request.method === 'POST' || /^\/api\/player\/bookings\/[^/]+\/(receipt|cancel)$/.test(path);
-  const handled = path === '/api/player/config' || path.startsWith('/api/finance/') || path.startsWith('/api/marketplace') || playerMutation;
+  const coachPlayer = path === '/api/player/lessons' || /^\/api\/player\/lessons\/[^/]+\/(receipt|cancel)$/.test(path);
+  const coachPublic = path === '/api/coach-catalog' || path === '/api/venues';
+  const handled = path === '/api/player/config' || path.startsWith('/api/finance/') || path.startsWith('/api/marketplace') || path === '/api/coaching' || path.startsWith('/api/coaching/') || coachPublic || coachPlayer || playerMutation;
   if (!handled) return null;
   try {
     if (!['GET', 'POST'].includes(request.method)) fail(405, 'วิธีส่งคำขอไม่รองรับ');
     if (request.method === 'POST' && (request.headers.get('Sec-Fetch-Site') === 'cross-site' || request.headers.has('Origin') && request.headers.get('Origin') !== new URL(request.url).origin)) fail(403, 'ไม่อนุญาตคำขอข้ามเว็บไซต์');
     if (!env.TIDB_DATABASE_URL) fail(503, 'ฐานข้อมูลยังไม่พร้อม');
     const db = new TidbDocuments(env.TIDB_DATABASE_URL);
+    if (coachPublic) {
+      if (request.method !== 'GET') fail(405, 'ใช้ GET');
+      if (path === '/api/venues') return json({ venues: (await db.readDocument<Venue[]>('court-venues', [])).filter(v => v.active) });
+      const [docs, settings, account, owner] = await Promise.all([db.readFinance(), db.readDocument<{ bookingEnabled?: boolean }>('worker-pilot', {}), db.readTransferAccount(), db.readDocument<Partial<Organizer>>(organizerKey, {})]);
+      return json(coachCatalog(docs, Boolean(settings.bookingEnabled && account && owner.sub && env.ADMIN_SESSION_SECRET && env.RECEIPTS)));
+    }
     if (path === '/api/player/config') {
       const [settings, account, owner] = await Promise.all([db.readDocument<{ bookingEnabled?: boolean }>('worker-pilot', {}), db.readTransferAccount(), db.readDocument<Partial<Organizer>>(organizerKey, {})]);
       return json({ liffId: env.VITE_LIFF_ID || null, connected: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), profileEditingEnabled: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), bookingEnabled: Boolean(settings.bookingEnabled && account && owner.sub && env.ADMIN_SESSION_SECRET && env.RECEIPTS), pilot: true });
@@ -73,6 +84,30 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       return json({ authenticated: true, role: member?.role || 'owner' }, 200, { 'Set-Cookie': await adminCookie(env.ADMIN_SESSION_SECRET, { ...actor, linkedAt: '', version: member?.version }) });
     }
     if (path === '/api/finance/logout') { if (request.method !== 'POST') fail(405, 'ใช้ POST'); return json({ success: true }, 200, { 'Set-Cookie': clearAdminCookie() }); }
+    if (coachPlayer) {
+      const actor = await identity(request, env, verify);
+      if (path === '/api/player/lessons') {
+        if (request.method === 'GET') return json({ lessons: (await db.readFinance()).coaching.filter(e => e.playerId === 'line:' + actor.sub).map(e => lessonView(e)) });
+        const v = await body(request), [settings, account, owner] = await Promise.all([db.readDocument<{ bookingEnabled?: boolean }>('worker-pilot', {}), db.readTransferAccount(), db.readDocument<Partial<Organizer>>(organizerKey, {})]);
+        if (!owner.sub || !env.ADMIN_SESSION_SECRET || !env.RECEIPTS) fail(503, 'ผู้จัดยังไม่พร้อมรับจอง');
+        const result = await db.updateFinance((docs, context) => bookLesson(docs, actor, v.slotId, context.enabled, context.account || undefined), audit(actor, 'coaching.booked', String(v.slotId)));
+        return json({ ...result, message: 'จองเวลาแล้ว แนบสลิปและรอผู้จัดตรวจเงิน' }, result.repeated ? 200 : 201);
+      }
+      if (request.method !== 'POST') fail(405, 'ใช้ POST');
+      const match = path.match(/^\/api\/player\/lessons\/([^/]+)\/(receipt|cancel)$/)!, id = decodeURIComponent(match[1]);
+      if (match[2] === 'cancel') return json(await db.updateFinance(docs => cancelLesson(docs, actor, id), audit(actor, 'coaching.cancelled', id)));
+      if (!env.RECEIPTS) fail(503, 'ที่เก็บสลิปยังไม่พร้อม');
+      lessonReceiptEligibility(await db.readFinance(), actor, id);
+      const type = request.headers.get('Content-Type')?.split(';')[0].toLowerCase() || '', image = await bytes(request, 5 * 1024 * 1024);
+      if (!validImage(image, type)) fail(415, 'รับภาพ JPG PNG WebP ไม่เกิน 5 MB');
+      await limitAuth(db, actor.sub, true);
+      const receiptId = crypto.randomUUID(), hash = await digest(image);
+      const receipt: ReceiptSubmission = { id: receiptId, fileName: receiptId, mimeType: type as ReceiptSubmission['mimeType'], size: image.length, sha256: hash, submittedAt: new Date().toISOString(), status: 'pending', ocr: unavailableOcr() };
+      await env.RECEIPTS.put('receipt:' + receiptId, new Uint8Array(image).buffer);
+      try { await db.updateFinance(docs => submitLessonReceipt(docs, actor, id, receipt), audit(actor, 'coaching.receipt.submitted', receiptId)); }
+      catch (e) { if (e instanceof PilotError) await env.RECEIPTS.delete('receipt:' + receiptId); throw e; }
+      return json({ receipt: { id: receiptId, status: 'pending' } }, 201);
+    }
     if (playerMutation) {
       if (request.method !== 'POST') fail(405, 'ใช้ POST');
       const actor = await identity(request, env, verify);
@@ -94,7 +129,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       const receiptId = crypto.randomUUID(), hash = await digest(image);
       const receipt: ReceiptSubmission = { id: receiptId, fileName: `${receiptId}.${type === 'image/jpeg' ? 'jpg' : type === 'image/png' ? 'png' : 'webp'}`, mimeType: type as ReceiptSubmission['mimeType'], size: image.length, sha256: hash, submittedAt: new Date().toISOString(), status: 'pending', ocr: unavailableOcr() };
       await env.RECEIPTS.put(`receipt:${receiptId}`, new Uint8Array(image).buffer);
-      try { await db.updateMarketplace((data, ctx) => { const b = receiptEligibility(data, actor, id); if (ctx.closed.includes(`game:${b.sessionId}`)) fail(409, 'ก๊วนปิดยอดแล้ว'); submitReceipt(data, actor, id, receipt); }, audit(actor, 'receipt.submitted', receiptId), true); }
+      try { await db.updateFinance(docs => { const b = receiptEligibility(docs.marketplace, actor, id); if (docs['revenue-settlements'].some(s => s.key === `game:${b.sessionId}`)) fail(409, 'ก๊วนปิดยอดแล้ว'); if (docs.coaching.some(e => e.receipts?.some(r => r.sha256 === receipt.sha256 && r.status !== 'rejected'))) fail(409, 'ภาพสลิปนี้ใช้กับการเรียนแล้ว'); submitReceipt(docs.marketplace, actor, id, receipt); }, audit(actor, 'receipt.submitted', receiptId)); }
       catch (e) {
         // Business rejection happened before commit. A network error may have happened after commit;
         // retain the image in that case so a paid booking never loses its evidence.
@@ -105,6 +140,36 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     }
     const owner = await authenticateAdmin(request, env.ADMIN_SESSION_SECRET, db);
     authorize(owner.role, path, request.method);
+    if (path === '/api/marketplace/venues' && request.method === 'GET') return json({ venues: await db.readDocument<Venue[]>('court-venues', []) });
+    if (/^\/api\/marketplace\/venues(?:\/[^/]+)?$/.test(path) && request.method === 'POST') {
+      const v = await body(request), id = path.split('/')[4];
+      return json(await db.updateDocument<Venue[], Venue>('court-venues', [], rows => saveVenue(rows, v, id), audit(owner, 'venue.updated', id || 'new', true)), id ? 200 : 201);
+    }
+    if (path === '/api/coaching' && request.method === 'GET') return json(coachAdmin(await db.readFinance()));
+    if (path.startsWith('/api/coaching/')) {
+      const receiptPath = path.match(/^\/api\/coaching\/enrollments\/([^/]+)\/receipts\/([^/]+)(?:\/(review))?$/);
+      if (receiptPath) {
+        const [, id, receiptId, reviewAction] = receiptPath;
+        if (request.method === 'POST' && reviewAction) { const v = await body(request); return json(await db.updateFinance(d => reviewLessonReceipt(d, id, receiptId, v), audit(owner, 'coaching.receipt.reviewed', receiptId, true))); }
+        if (request.method !== 'GET' || reviewAction) fail(405, 'วิธีส่งไม่รองรับ');
+        const docs = await db.readFinance(), receipt = docs.coaching.find(e => e.id === id)?.receipts?.find(r => r.id === receiptId);
+        if (!receipt) fail(404, 'ไม่พบสลิป');
+        const image = await env.RECEIPTS?.get('receipt:' + receiptId, 'arrayBuffer');
+        if (!image) fail(503, 'ภาพยังไม่พร้อม กรุณาลองใหม่');
+        return new Response(image, { headers: { 'Content-Type': receipt.mimeType, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" } });
+      }
+      if (request.method !== 'POST') fail(405, 'ใช้ POST');
+      const v = await body(request), event = audit(owner, 'coaching.updated', String(v.id || path), true);
+      if (path === '/api/coaching/coaches') return json(await db.updateFinance(d => saveCoach(d, v, undefined, owner.role === 'owner'), event), 201);
+      if (path === '/api/coaching/slots') return json(await db.updateFinance(d => createCoachSlot(d, v), event), 201);
+      const coach = path.match(/^\/api\/coaching\/coaches\/([^/]+)$/);
+      if (coach) return json(await db.updateFinance(d => saveCoach(d, v, coach[1], owner.role === 'owner'), event));
+      const slot = path.match(/^\/api\/coaching\/slots\/([^/]+)$/);
+      if (slot) return json(await db.updateFinance(d => changeCoachSlot(d, slot[1], v), event));
+      const enrollment = path.match(/^\/api\/coaching\/enrollments\/([^/]+)\/(cancel|complete)$/);
+      if (enrollment) return json(await db.updateFinance(d => enrollment[2] === 'cancel' ? cancelLesson(d, owner, enrollment[1], true) : completeLesson(d, enrollment[1]), event));
+      fail(404, 'ไม่พบเมนูโค้ช');
+    }
     if (path === '/api/finance/admin-team') {
       if (request.method === 'GET') return json(publicTeam(await db.readDocument<Team>(teamKey, emptyTeam())));
       const v = await body(request);
@@ -157,6 +222,8 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       if (!image) fail(503, 'ภาพสลิปยังไม่พร้อม อาจกำลังจัดเก็บ กรุณาลองใหม่');
       return new Response(image, { headers: { 'Content-Type': receipt.mimeType, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" } });
     }
+    const cancellation = path.match(/^\/api\/marketplace\/bookings\/([^/]+)\/cancel$/);
+    if (cancellation && request.method === 'POST') return json(await db.updateMarketplace(data => cancel(data, owner, cancellation[1], true), audit(owner, 'booking.cancelled', cancellation[1], true)));
     const admission = path.match(/^\/api\/marketplace\/bookings\/([^/]+)\/admission$/);
     if (admission && request.method === 'POST') { const v = await body(request); return json(await db.updateMarketplace((data, ctx) => admit(data, ctx, admission[1], v.action), audit(owner, `admission.${v.action}`, admission[1], true), true)); }
     fail(503, 'เมนูนี้ยังไม่เปิดบน Cloudflare');

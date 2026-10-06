@@ -1,5 +1,7 @@
-export type Coach = { id: string; name: string; initials: string; specialty: string; bio: string; venue: string; hourlyRate: number; courses: { id: string; name: string; hours: number; price: number }[] };
+import type { ReceiptSubmission, TransferAccount } from './marketplaceTypes';
+export type Coach = { id: string; name: string; initials: string; specialty: string; bio: string; venue: string; hourlyRate: number; active?: boolean; bookingFee?: number; bookingReady?: boolean; courses: { id: string; name: string; hours: number; price: number }[] };
 export type Lesson = { id: string; slotId?: string; start: string; hours: number; status: 'scheduled' | 'completed' | 'cancelled' };
-export type CoachSlot = { id: string; coachId: string; start: string; hours: number; price: number; status: 'open' | 'blocked' | 'booked' };
-export type Enrollment = { id: string; coachId: string; student: string; phone: string; title: string; totalHours: number; amount: number; payment: 'pending' | 'paid'; paymentMethod?: string; paidAt?: string; createdAt: string; lessons: Lesson[] };
+export type CoachSlot = { id: string; coachId: string; start: string; hours: number; price: number; status: 'open' | 'blocked' | 'booked'; bookingReady?: boolean };
+export type Enrollment = { id: string; coachId: string; student: string; phone: string; title: string; totalHours: number; amount: number; payment: 'pending' | 'paid'; paymentMethod?: string; paidAt?: string; createdAt: string; lessons: Lesson[]; playerId?: string; venue?: string; cancelledAt?: string; transferAccount?: TransferAccount; receipts?: ReceiptSubmission[]; bookingFee?: number; holdExpiresAt?: string };
+export const lessonHoldExpired = (e: Enrollment) => Boolean(e.holdExpiresAt && Date.parse(e.holdExpiresAt) <= Date.now() && e.payment !== 'paid' && e.receipts?.at(-1)?.status !== 'pending');
 export type CoachingState = { coaches: Coach[]; enrollments: Enrollment[]; slots: CoachSlot[]; demo: boolean };

@@ -1,5 +1,5 @@
 import type { Booking, MemberProfile, Session } from '../src/marketplaceTypes';
-import { coaches } from '../server/coachCatalog';
+import { lessonView } from './coachingDomain';
 import { TidbDocuments } from './tidbDocuments';
 import { ownProfile, profileSettings, updateProfile } from '../server/playerProfiles';
 import { pilotRequest, type ReceiptKV } from './pilot';
@@ -134,9 +134,6 @@ export default {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return json({ message: 'ระบบนี้กำลังทดสอบการอ่านข้อมูลจาก TiDB ยังไม่เปิดรับจองหรือสลิป' }, 503);
     }
-    if (pathname === '/api/coach-catalog') {
-      return json({ coaches, slots: [], bookingEnabled: false, demo: true });
-    }
     if (pathname === '/api/player/sessions' || pathname === '/api/health' ||
       pathname === '/api/player/me' || pathname === '/api/player/bookings') {
       if (!env.TIDB_DATABASE_URL) return json({ status: 'unavailable', mode: 'tidb-pilot-prepared', database: 'not-configured' }, 503);
@@ -168,7 +165,8 @@ export default {
               receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, rejectReason: receipt.rejectReason || null } : null,
             };
           });
-          return json({ bookings });
+          const coaching = (await new TidbDocuments(env.TIDB_DATABASE_URL).readDocument<import('../src/coachingTypes').Enrollment[]>('coaching', [])).filter(e => e.playerId === `line:${identity.sub}`).map(lessonView);
+          return json({ bookings: [...bookings.map(b => ({ ...b, kind: 'game' })), ...coaching] });
         }
         return json({ sessions: data.sessions.map(session => publicSession(session, data.bookings, data.profiles)) });
       } catch (error) {

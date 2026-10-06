@@ -6,11 +6,11 @@ export function splitRevenue(gross: number, refunds: number, directCosts: number
   const processing = Math.round(gross * rule.processingBps / 10000);
   const rawMargin = sales - directCosts - processing;
   const distributable = Math.max(0, rawMargin);
-  const calculatedPlatform = Math.round((rule.basis === 'gross' ? sales : distributable) * rule.platformBps / 10000);
+  const calculatedPlatform = rule.platformFixedSatang ?? Math.round((rule.basis === 'gross' ? sales : distributable) * rule.platformBps / 10000);
   const platform = Math.min(distributable, calculatedPlatform);
   return { processing, distributable, deficit: Math.max(0, -rawMargin) + Math.max(0, refunds - gross), platform, partner: distributable - platform };
 }
-export function buildRevenueUnits(rows: FinanceRow[], config: RevenueConfig, fingerprintOf: (source: string) => string): RevenueUnit[] {
+export function buildRevenueUnits(rows: FinanceRow[], config: RevenueConfig, fingerprintOf: (source: string) => string, fixedFees: Record<string, number> = {}): RevenueUnit[] {
   const groups = new Map<string, FinanceRow[]>();
   for (const row of rows.filter(r => r.type === 'income' && r.status === 'settled' && (r.source === 'game' || r.source === 'coaching'))) {
     const key = row.source === 'game' ? 'game:' + row.reference.split(':')[0] : 'coaching:' + row.reference;
@@ -23,7 +23,8 @@ export function buildRevenueUnits(rows: FinanceRow[], config: RevenueConfig, fin
     const payouts = expenses.filter(r => ['coach_payout', 'organizer'].includes(r.category));
     const direct = expenses.filter(r => !['coach_payout', 'organizer', 'refund'].includes(r.category));
     const gross = sum(sales), refunds = sum(expenses.filter(r => r.category === 'refund')), directCosts = sum(direct);
-    const rule = config[kind], split = splitRevenue(gross, refunds, directCosts, rule);
+    const rule = fixedFees[key] === undefined ? config[kind] : { ...config[kind], platformFixedSatang: fixedFees[key] };
+    const split = splitRevenue(gross, refunds, directCosts, rule);
     const paidPartner = sum(payouts.filter(r => r.status === 'settled')), pendingPartner = sum(payouts.filter(r => r.status === 'pending'));
     // Payout status changes don't alter the split, but linked cost/refund changes do.
     const fingerprint = fingerprintOf(JSON.stringify([...sales, ...expenses.filter(r => !payouts.includes(r))].map(r => [r.id, r.amount, r.type === 'expense' ? 'reserved' : r.status, r.category]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))));

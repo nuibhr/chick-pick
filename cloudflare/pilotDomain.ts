@@ -29,12 +29,13 @@ export function ownBooking(data: MarketplaceData, actor: Actor, id: string) {
   if (!booking) fail(404, 'ไม่พบการจองของคุณ');
   return booking;
 }
-export function cancel(data: MarketplaceData, actor: Actor, id: string) {
-  const booking = ownBooking(data, actor, id);
+export function cancel(data: MarketplaceData, actor: Actor, id: string, organizer = false) {
+  const booking = organizer ? data.bookings.find(b => b.id === id) : ownBooking(data, actor, id);
+  if (!booking) fail(404, 'ไม่พบการจอง');
   if (booking.cancelledAt) return { repeated: true };
   if (booking.paidAt || booking.admissionStatus === 'approved' || booking.receipts?.at(-1)?.status === 'pending') fail(409, 'มีการรับเงินหรือสลิปรอตรวจ กรุณาติดต่อผู้จัด');
   if (!future(data.sessions.find(s => s.id === booking.sessionId))) fail(409, 'ก๊วนเริ่มแล้ว กรุณาติดต่อผู้จัด');
-  booking.cancelledAt = new Date().toISOString(); booking.cancelledBy = 'player';
+  booking.cancelledAt = new Date().toISOString(); booking.cancelledBy = organizer ? 'organizer' : 'player';
   return { repeated: false };
 }
 export function receiptEligibility(data: MarketplaceData, actor: Actor, id: string) {
