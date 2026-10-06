@@ -3,6 +3,7 @@ import { lessonHoldExpired } from '../src/coachingTypes';
 import type { ReceiptSubmission } from '../src/marketplaceTypes';
 import type { FinanceDocuments } from './financeDomain';
 import { fail, type Actor } from './pilotDomain';
+import { recordVerifiedTransfer } from './receiptVerification';
 
 const active = (e: Enrollment) => !e.cancelledAt && !lessonHoldExpired(e) && e.lessons.some(l => l.status !== 'cancelled');
 const reserved = (docs: FinanceDocuments, slot: CoachSlot) => docs.coaching.some(e => e.coachId === slot.coachId && active(e) && e.lessons.some(l => l.status !== 'cancelled' && Date.parse(l.start) < Date.parse(slot.start) + slot.hours * 3600000 && Date.parse(l.start) + l.hours * 3600000 > Date.parse(slot.start)));
@@ -86,6 +87,7 @@ export function reviewLessonReceipt(docs: FinanceDocuments, id: string, receiptI
   if (closed(docs, id) || !active(e) || e.payment === 'paid' || r.status !== 'pending') fail(409, 'สลิปนี้ไม่อยู่ระหว่างรอตรวจ');
   if (v.action === 'approve') {
     if (v.fundsChecked !== true) fail(400, 'ต้องตรวจยอดเงินเข้าบัญชีจริงก่อนอนุมัติ');
+    recordVerifiedTransfer(r, Math.round(e.amount * 100), v, [...docs.marketplace.bookings, ...docs.coaching].flatMap(item => item.receipts || []));
     r.status = 'approved'; e.paidAt = new Date().toISOString(); e.payment = 'paid'; e.paymentMethod = 'transfer';
   } else if (v.action === 'reject') { r.rejectReason = text(v.reason, 200); if (r.rejectReason.length < 3) fail(400, 'ระบุเหตุผลอย่างน้อย 3 ตัวอักษร'); r.status = 'rejected'; e.holdExpiresAt = new Date(Date.now() + 1800000).toISOString(); }
   else fail(400, 'เลือกอนุมัติหรือปฏิเสธ');

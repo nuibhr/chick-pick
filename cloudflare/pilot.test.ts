@@ -6,6 +6,92 @@ import { organizerKey } from './pilotAuth';
 import type { MarketplaceData } from '../src/marketplaceTypes';
 import type { PilotContext } from './pilotDomain';
 
+test('one LINE player cannot gain extra seats or payments from concurrent bookings and different slips', async t => {
+  const f = fixture(t), admin = await f.signIn();
+  f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  const replies = await Promise.all(Array.from({ length: 12 }, () => f.request('/api/player/bookings', { sessionId: 'game', playerId: 'forged' }, f.player('a'))));
+  assert.equal(replies.filter(r => r.status === 201).length, 1);
+  assert.equal(replies.filter(r => r.status === 200).length, 11);
+  assert.equal(f.data.bookings.length, 1);
+  const id = f.data.bookings[0].id;
+  const upload = (suffix: number) => pilotRequest(new Request(`https://example.com/api/player/bookings/${id}/receipt`, { method: 'POST', headers: { ...f.player('a'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,suffix]) }), f.env, f.verify);
+  const slips = await Promise.all(Array.from({ length: 5 }, (_, i) => upload(i)));
+  assert.equal(slips.filter(r => r.status === 201).length, 1);
+  assert.equal(slips.filter(r => r.status === 409).length, 4);
+  assert.equal(f.images.size, 1);
+  const receiptId = f.data.bookings[0].receipts![0].id;
+  const path = `/api/marketplace/bookings/${id}/receipts/${receiptId}/review`;
+  const approvals = await Promise.all(Array.from({ length: 3 }, () => f.request(path, { action: 'approve', fundsChecked: true, transferReference: 'TEST-ONCE-0001', receivedAmount: 190 }, admin)));
+  assert.deepEqual(approvals.map(r => r.status).sort(), [200,409,409]);
+  assert.equal((await upload(99)).status, 409);
+  assert.equal(f.data.bookings.length, 1);
+  const report = await (await f.request('/api/finance/report', undefined, admin)).json();
+  assert.equal(report.summary.income, 19000);
+});
+
+test('same bank transfer with different images is rejected across games and coaching atomically', async t => {
+  const f = fixture(t), admin = await f.signIn();
+  f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  const upload = (path: string, who: string, suffix: number) => pilotRequest(new Request('https://example.com' + path, { method: 'POST', headers: { ...f.player(who), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,suffix]) }), f.env, f.verify);
+  const paths: string[] = [];
+  for (const [n, who] of ['a','b','c'].entries()) {
+    const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who))).json()).booking.id;
+    const receiptId = (await (await upload(`/api/player/bookings/${id}/receipt`, who, n + 1))!.json()).receipt.id;
+    paths.push(`/api/marketplace/bookings/${id}/receipts/${receiptId}/review`);
+  }
+  const approval = { action: 'approve', fundsChecked: true, transferReference: 'TEST-TRANSFER-0001', receivedAmount: 190 };
+  assert.equal((await f.request(paths[0], approval, admin)).status, 200);
+  assert.equal((await f.request(paths[1], { ...approval, transferReference: 'test transfer 0001' }, admin)).status, 409);
+  assert.equal(f.data.bookings[1].paidAt, undefined);
+  assert.equal(f.data.bookings[1].receipts![0].status, 'pending');
+  const race = await Promise.all(paths.slice(1).map(path => f.request(path, { ...approval, transferReference: 'TEST-TRANSFER-0002' }, admin)));
+  assert.deepEqual(race.map(r => r.status).sort(), [200,409]);
+  const coach = await (await f.request('/api/coaching/coaches', { name: 'Test', specialty: 'Test', bio: '', venue: 'Court', hourlyRate: 600, bookingFee: 100, active: true }, admin)).json();
+  const start = new Date(Math.ceil((Date.now() + 86400000) / 1800000) * 1800000).toISOString();
+  const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start, hours: 1, status: 'open' }, admin)).json();
+  const lesson = await (await f.request('/api/player/lessons', { slotId: slot.id }, f.player('a'))).json();
+  const slip = (await (await upload(`/api/player/lessons/${lesson.id}/receipt`, 'a', 10))!.json()).receipt.id;
+  const reviewPath = `/api/coaching/enrollments/${lesson.id}/receipts/${slip}/review`;
+  assert.equal((await f.request(reviewPath, { ...approval, receivedAmount: 600 }, admin)).status, 409);
+  assert.equal((await f.request(reviewPath, { ...approval, transferReference: 'TEST-TRANSFER-0003', receivedAmount: 1 }, admin)).status, 400);
+  assert.equal((await f.request(reviewPath, { ...approval, transferReference: '', receivedAmount: 600 }, admin)).status, 400);
+  assert.equal((await f.request(reviewPath, { ...approval, transferReference: 'TEST-TRANSFER-0003', receivedAmount: 600 }, admin)).status, 200);
+  const unpaidPath = paths[f.data.bookings.findIndex(b => !b.paidAt)];
+  assert.equal((await f.request(unpaidPath, { ...approval, transferReference: 'TEST-TRANSFER-0003' }, admin)).status, 409);
+});
+
+test('opening Open Play requires a registered active venue and a future game', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
+  assert.equal((await f.request('/api/marketplace/setup/pilot', { bookingEnabled: true }, owner)).status, 409);
+  f.docs.set('court-venues', [{ id: 'court', name: 'สนาม', area: 'ขอนแก่น', address: '', active: true }]);
+  f.data.sessions[0].startsAt = new Date(Date.now() - 86400000).toISOString();
+  assert.equal((await f.request('/api/marketplace/setup/pilot', { bookingEnabled: true }, owner)).status, 409);
+  f.data.sessions[0].startsAt = new Date(Date.now() + 86400000).toISOString();
+  assert.equal((await f.request('/api/marketplace/setup/pilot', { bookingEnabled: true }, owner)).status, 200);
+  assert.equal((await (await f.request('/api/marketplace/setup', undefined, owner)).json()).readiness.openPlayReady, true);
+  assert.equal((await f.request('/api/marketplace/setup/pilot', { bookingEnabled: false }, owner)).status, 200);
+});
+
+test('new Open Play uses a registered venue and derives the displayed Thai time from its start and end', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  const start = new Date(Date.now() + 86400000), end = new Date(start.getTime() + 7200000);
+  const value = { title: 'Test Open Play', venueId: 'court', venue: 'forged', area: 'forged', host: 'Test', startsAt: start.toISOString(), endsAt: end.toISOString(), time: 'wrong', price: 190, capacity: 12, courtCount: 1, style: 'casual' };
+  assert.equal((await f.request('/api/marketplace/sessions', value, owner)).status, 400);
+  f.docs.set('court-venues', [{ id: 'court', name: 'สนามจริง', area: 'ย่านจริง', address: '', active: true }]);
+  assert.equal((await f.request('/api/marketplace/sessions', { ...value, endsAt: start.toISOString() }, owner)).status, 400);
+  const created = await f.request('/api/marketplace/sessions', value, owner);
+  assert.equal(created.status, 201);
+  const game = await created.json();
+  assert.equal(game.venue, 'สนามจริง'); assert.equal(game.area, 'ย่านจริง');
+  assert.equal(game.endsAt, end.toISOString()); assert.notEqual(game.time, 'wrong');
+  f.docs.set('court-venues', [{ id: 'court', name: 'เปลี่ยนชื่อสนาม', area: 'ย่านจริง', address: '', active: true }]);
+  assert.equal((await (await f.request('/api/marketplace/setup', undefined, owner)).json()).readiness.futureOpenPlayCount, 1);
+  assert.equal((await f.request('/api/marketplace/sessions', { ...value, price: 1.999 }, owner)).status, 400);
+});
+
 test('real coach calendar: no anonymous admin access, server pricing, overlap, last-slot race and cancellation', async t => {
   const f = fixture(t), admin = await f.signIn();
   assert.equal((await f.request('/api/coaching')).status, 401);
@@ -62,7 +148,7 @@ test('coaching receipts are private, cannot reuse game slips, require manual app
   assert.equal((await f.request(route+'/review',{action:'reject',reason:'ภาพไม่ชัด'},admin)).status,200);
   const second = await upload('/api/player/lessons/'+id+'/receipt',3);
   const secondId = (await second.json()).receipt.id;
-  assert.equal((await f.request('/api/coaching/enrollments/'+id+'/receipts/'+secondId+'/review',{action:'approve',fundsChecked:true},admin)).status,200);
+  assert.equal((await f.request('/api/coaching/enrollments/'+id+'/receipts/'+secondId+'/review',{action:'approve',fundsChecked:true,transferReference:'TEST-COACH-0001',receivedAmount:600},admin)).status,200);
   assert.equal((await f.request('/api/player/lessons/'+id+'/cancel',{},f.player('a'))).status,409);
   await f.request('/api/coaching/coaches/'+coach.id,{...coach,bookingFee:700},admin);
   assert.equal((await f.request('/api/player/lessons',{slotId:slot.id},f.player('a'))).status,200);
@@ -177,6 +263,7 @@ test('pilot booking, private slip, rejection/resubmission, manual funds approval
   assert.equal((await f.request('/api/player/bookings',{sessionId:'game'},player)).status,503);
   assert.equal((await f.request('/api/marketplace/setup/pilot',{bookingEnabled:true},admin)).status,409);
   assert.equal((await f.request('/api/marketplace/setup/transfer-account',{bankName:'ธนาคารทดสอบ',accountName:'บัญชีจำลอง',accountNumber:'0000000000'},admin)).status,200);
+  f.docs.set('court-venues', [{ id: 'court', name: 'สนาม', area: 'ขอนแก่น', address: '', active: true }]);
   await f.request('/api/marketplace/setup/pilot',{bookingEnabled:true},admin);
   assert.equal((await (await f.request('/api/player/config')).json()).bookingEnabled,true);
   const created=await f.request('/api/player/bookings',{sessionId:'game',amount:1,playerId:'other'},player); assert.equal(created.status,201);
@@ -191,7 +278,8 @@ test('pilot booking, private slip, rejection/resubmission, manual funds approval
   assert.equal((await f.request(`/api/marketplace/bookings/${id}/receipts/${receiptId}/review`,{action:'reject',reason:'ภาพไม่ชัด'},admin)).status,200);
   const second=await upload(),next=(await second.json()).receipt.id; assert.equal(second.status,201);
   assert.equal((await f.request(`/api/marketplace/bookings/${id}/receipts/${next}/review`,{action:'approve'},admin)).status,400);
-  assert.equal((await f.request(`/api/marketplace/bookings/${id}/receipts/${next}/review`,{action:'approve',fundsChecked:true},admin)).status,200);
+  assert.equal((await f.request(`/api/marketplace/bookings/${id}/receipts/${next}/review`,{action:'approve',fundsChecked:true},admin)).status,400);
+  assert.equal((await f.request(`/api/marketplace/bookings/${id}/receipts/${next}/review`,{action:'approve',fundsChecked:true,transferReference:'TEST-GAME-0001',receivedAmount:190},admin)).status,200);
   assert.equal(f.data.bookings[0].admissionStatus,'pending');
   assert.equal((await f.request(`/api/marketplace/bookings/${id}/receipts/${next}/review`,{action:'approve',fundsChecked:true},admin)).status,409);
   assert.equal((await f.request(`/api/marketplace/bookings/${id}/admission`,{action:'approve'},admin)).status,200);

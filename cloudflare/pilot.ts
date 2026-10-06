@@ -6,6 +6,8 @@ import { configure, createEntry, csv, report, revenueReport, settle, updateEntry
 import { authorize, changeMember, claim, emptyTeam, invite, publicTeam, teamKey, type Team, type Member } from './adminTeam';
 import { bookLesson, cancelLesson, changeCoachSlot, coachAdmin, coachCatalog, completeLesson, createCoachSlot, lessonReceiptEligibility, lessonView, reviewLessonReceipt, saveCoach, submitLessonReceipt } from './coachingDomain';
 import { saveVenue } from './venues';
+import { recordVerifiedTransfer } from './receiptVerification';
+import { bookingReadiness } from './bookingReadiness';
 import type { Venue } from '../src/venueTypes';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
@@ -195,7 +197,11 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       if (request.method !== 'GET') fail(405, 'ใช้ GET');
       const data = await db.readMarketplace(); return json({ ...data, demo: false, pilot: true });
     }
-    if (path === '/api/marketplace/setup') { if (request.method !== 'GET') fail(405, 'ใช้ GET'); return json({ transferAccount: owner.role === 'viewer' ? null : await db.readTransferAccount(), pilot: await db.readDocument('worker-pilot', { bookingEnabled: false }), ownerName: owner.name, role: owner.role, ocrConfigured: false }); }
+    if (path === '/api/marketplace/setup') {
+      if (request.method !== 'GET') fail(405, 'ใช้ GET');
+      const [account, venues, docs, pilot] = await Promise.all([db.readTransferAccount(), db.readDocument<Venue[]>('court-venues', []), db.readFinance(), db.readDocument('worker-pilot', { bookingEnabled: false })]);
+      return json({ transferAccount: owner.role === 'viewer' ? null : account, pilot, ownerName: owner.name, role: owner.role, ocrConfigured: false, readiness: bookingReadiness(docs, venues, account, Boolean(env.RECEIPTS)) });
+    }
     if (path === '/api/marketplace/setup/transfer-account' && request.method === 'POST') {
       const account = transferAccount(await body(request)); if (!account) fail(400, 'ระบุธนาคาร ชื่อบัญชี และเลขบัญชี 10–15 หลัก');
       await db.updateDocument('transfer-account', {} as Record<string, unknown>, saved => Object.assign(saved, account), audit(owner, 'transfer_account.updated', 'transfer-account', true)); return json({ transferAccount: account });
@@ -203,16 +209,32 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     if (path === '/api/marketplace/setup/pilot' && request.method === 'POST') {
       const v = await body(request); if (typeof v.bookingEnabled !== 'boolean') fail(400, 'เลือกเปิดหรือปิดรับจอง');
       if (v.bookingEnabled && (!env.RECEIPTS || !(await db.readTransferAccount()))) fail(409, 'ตั้งบัญชีรับโอนและที่เก็บสลิปก่อน');
+      if (v.bookingEnabled) {
+        const [account, venues, docs] = await Promise.all([db.readTransferAccount(), db.readDocument<Venue[]>('court-venues', []), db.readFinance()]);
+        if (!bookingReadiness(docs, venues, account, Boolean(env.RECEIPTS)).readyToOpen) fail(409, 'เพิ่มสนามที่เปิดแสดง และสร้างก๊วนหรือช่วงเวลาโค้ชในอนาคตที่สนามนั้นก่อนเปิดรับ');
+      }
       await db.updateDocument('worker-pilot', { bookingEnabled: false }, saved => { saved.bookingEnabled = v.bookingEnabled as boolean; }, audit(owner, 'pilot.updated', 'worker-pilot', true)); return json({ bookingEnabled: v.bookingEnabled });
     }
     if (path === '/api/marketplace/sessions' && request.method === 'POST') {
-      const session = newSession(await body(request)); await db.updateMarketplace(data => { data.sessions.unshift(session); }, audit(owner, 'session.created', session.id, true)); return json(session, 201);
+      const v = await body(request), venues = await db.readDocument<Venue[]>('court-venues', []);
+      const venue = venues.find(row => row.active && (v.venueId ? row.id === v.venueId : row.name === v.venue));
+      if (!venue) fail(400, 'เลือกสนามที่เปิดแสดงจากทะเบียนสนามก่อน');
+      if (typeof v.endsAt !== 'string') fail(400, 'ระบุเวลาจบก๊วน');
+      const session = newSession({ ...v, venueId: venue.id, venue: venue.name, area: venue.area }); await db.updateMarketplace(data => { data.sessions.unshift(session); }, audit(owner, 'session.created', session.id, true)); return json(session, 201);
     }
     const receiptRoute = path.match(/^\/api\/marketplace\/bookings\/([^/]+)\/receipts\/([^/]+)(\/review)?$/);
     if (receiptRoute) {
       const [, bookingId, receiptId, reviewing] = receiptRoute;
       if (reviewing && request.method === 'POST') {
-        const v = await body(request); return json(await db.updateMarketplace((data, ctx) => review(data, ctx, bookingId, receiptId, v.action, v.reason, v.fundsChecked), audit(owner, `receipt.${v.action}`, receiptId, true), true));
+        const v = await body(request); return json(await db.updateFinance((docs, ctx) => {
+          const result = review(docs.marketplace, ctx, bookingId, receiptId, v.action, v.reason, v.fundsChecked);
+          if (v.action === 'approve') {
+            const booking = docs.marketplace.bookings.find(b => b.id === bookingId)!;
+            const receipt = booking.receipts!.find(r => r.id === receiptId)!;
+            recordVerifiedTransfer(receipt, booking.amount, v, [...docs.marketplace.bookings, ...docs.coaching].flatMap(item => item.receipts || []));
+          }
+          return result;
+        }, audit(owner, `receipt.${v.action}`, receiptId, true)));
       }
       if (reviewing || request.method !== 'GET') fail(405, 'วิธีส่งคำขอไม่รองรับ');
       const receipt = (await db.readMarketplace()).bookings.find(b => b.id === bookingId)?.receipts?.find(r => r.id === receiptId);
