@@ -1,5 +1,11 @@
 # Chick&Pick MVP
 
+## Current hosted app — 7 October 2026
+
+The Cloudflare + TiDB app uses LINE owner/staff authentication, real Open Play and coach booking APIs, and private manual slip review. Staff can combine roles such as operator + finance; only the owner changes rates, payment settings and team access. Stripe PromptPay Checkout and signed webhooks are implemented for this Worker, but Stripe keys and account/payment verification are still required before enabling them. The Node preview remains a separate local backend.
+
+See [README-STRIPE.md](README-STRIPE.md) for setup and payment limitations, and [LAUNCH-REVIEW-2026-10-07.md](LAUNCH-REVIEW-2026-10-07.md) for the latest verified deployment status.
+
 ## Run locally
 
 Requires Node.js 22 or newer.
@@ -37,10 +43,10 @@ npm run build
 
 ## MVP limitations / next priorities
 
-The local development server remains a prototype. A separate Cloudflare staging URL reads public sessions from TiDB and allows authenticated LINE players to save their own profile, with a transactional audit record. Booking and payment APIs remain disabled there. Bookings and payment confirmations do not charge or transfer real money.
+The local development server remains a prototype. The Cloudflare app has TiDB-backed booking and manual payment-review APIs with transactional audit records. Stripe is an owner-selectable payment provider once server secrets are configured. Manual receipt approval does not move money; Stripe test payments do not count as real income. Payment-provider configuration and code tests do not prove a successful live payment or bank payout.
 
-1. Complete real-account mobile testing of the configured LINE MINI App Developing channel and LIFF ID on HTTPS. Configure the Published channel separately before public launch. Add organizer/coach roles and ownership checks; the single local organizer password and coaching demo access are not a production identity system.
-2. Finish the TiDB-backed Workers API for every mutable route and private durable receipt storage; add bank reconciliation, backups and retry handling. Local coaching and DUPR state still use files. Receipt approval stays manual until a verified bank integration exists.
+1. Complete ordinary-member mobile testing of the Published LINE MINI App and LIFF ID on HTTPS. The single local organizer password and coaching demo access belong to the Node preview, not the hosted LINE staff system.
+2. Configure and test Stripe PromptPay Checkout and webhook delivery before live activation; add payment reconciliation, backups and retry monitoring. Local coaching and DUPR state still use files. Existing slip approval stays manual.
 3. Define paid-booking refunds and settlement reversal/correction workflows, coach availability and course expiry. Unpaid bookings can now be cancelled, but they do not expire automatically.
 4. Separate estimated fees from actual provider fees and reconcile platform operating expenses before treating any displayed share as profit.
 5. Finish mobile browser acceptance testing and operational monitoring before public launch.

@@ -1,23 +1,25 @@
 import type { Booking, MarketplaceData, ReceiptSubmission, Session, TransferAccount } from '../src/marketplaceTypes';
 import { activeBooking } from '../src/marketplaceTypes';
+import { stripeLocksPayment } from '../src/paymentTypes';
 
 export class PilotError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 export const fail = (status: number, message: string): never => { throw new PilotError(status, message); };
-export type PilotContext = { account: TransferAccount | null; enabled: boolean; closed: string[] };
+export type PilotContext = { account: TransferAccount | null; enabled: boolean; closed: string[]; paymentProvider?: 'manual' | 'stripe'; stripeReady?: boolean };
 export type Actor = { sub: string; name: string };
 export const unavailableOcr = () => ({ status: 'unavailable' as const, amount: null, transferredAt: null, reference: null, sender: null, receiver: null, rawText: null, confidence: null });
 const future = (session?: Session) => session && session.status !== 'completed' && Number.isFinite(Date.parse(session.startsAt)) && Date.parse(session.startsAt) > Date.now();
 
 export function book(data: MarketplaceData, context: PilotContext, actor: Actor, sessionId: string) {
-  if (!context.enabled || !context.account) fail(503, 'ผู้จัดยังไม่เปิดรับจองหรือตั้งบัญชีรับโอน');
+  if (!context.enabled || (context.paymentProvider === 'stripe' ? !context.stripeReady : !context.account)) fail(503, 'ผู้จัดยังไม่เปิดรับจองหรือตั้งช่องทางชำระเงิน');
   if (context.closed.includes(`game:${sessionId}`)) fail(409, 'ก๊วนนี้ปิดยอดแล้ว');
   const session = data.sessions.find(s => s.id === sessionId);
   if (!session) fail(404, 'ไม่พบก๊วน');
   const existing = data.bookings.find(b => b.sessionId === sessionId && b.playerId === `line:${actor.sub}` && activeBooking(b));
   if (existing) return { id: existing.id, repeated: true };
   if (!future(session) || data.bookings.filter(b => b.sessionId === sessionId && activeBooking(b)).length >= session.capacity) fail(409, 'ก๊วนนี้ปิดรับหรือเต็มแล้ว');
+  if (context.paymentProvider === 'stripe' && (Date.parse(session.startsAt) < Date.now() + 35 * 60000 || session.price < 10 || session.price > 100000)) fail(409, 'PromptPay ต้องจองก่อนเริ่มอย่างน้อย 35 นาที และยอด 10–100,000 บาท');
   if (!Number.isSafeInteger(Math.round(session.price * 100)) || session.price <= 0) fail(409, 'ราคาก๊วนไม่ถูกต้อง ติดต่อผู้จัด');
   const booking: Booking = { id: crypto.randomUUID(), sessionId, playerId: `line:${actor.sub}`, playerName: actor.name, title: session.title, amount: Math.round(session.price * 100), createdAt: new Date().toISOString(), admissionStatus: 'pending', transferAccount: structuredClone(context.account) };
   data.bookings.push(booking);
@@ -33,14 +35,14 @@ export function cancel(data: MarketplaceData, actor: Actor, id: string, organize
   const booking = organizer ? data.bookings.find(b => b.id === id) : ownBooking(data, actor, id);
   if (!booking) fail(404, 'ไม่พบการจอง');
   if (booking.cancelledAt) return { repeated: true };
-  if (booking.paidAt || booking.admissionStatus === 'approved' || booking.receipts?.at(-1)?.status === 'pending') fail(409, 'มีการรับเงินหรือสลิปรอตรวจ กรุณาติดต่อผู้จัด');
+  if (booking.paidAt || stripeLocksPayment(booking.stripe) || booking.admissionStatus === 'approved' || booking.receipts?.at(-1)?.status === 'pending') fail(409, 'มีเงิน สลิปรอตรวจ หรือ QR Stripe ที่ยังไม่ปิด กรุณาติดต่อผู้จัด');
   if (!future(data.sessions.find(s => s.id === booking.sessionId))) fail(409, 'ก๊วนเริ่มแล้ว กรุณาติดต่อผู้จัด');
   booking.cancelledAt = new Date().toISOString(); booking.cancelledBy = organizer ? 'organizer' : 'player';
   return { repeated: false };
 }
 export function receiptEligibility(data: MarketplaceData, actor: Actor, id: string) {
   const booking = ownBooking(data, actor, id);
-  if (booking.cancelledAt || booking.paidAt || booking.receipts?.at(-1)?.status === 'pending') fail(409, 'รายการนี้ปิดรับสลิปหรือมีสลิปรอตรวจแล้ว');
+  if (booking.cancelledAt || booking.paidAt || stripeLocksPayment(booking.stripe) || booking.receipts?.at(-1)?.status === 'pending') fail(409, 'รายการนี้ปิดรับสลิป มี QR Stripe หรือมีสลิปรอตรวจแล้ว');
   if (!booking.transferAccount) fail(409, 'รายการนี้ไม่มีบัญชีรับโอน ติดต่อผู้จัด');
   if ((booking.receipts || []).filter(r => Date.parse(r.submittedAt) > Date.now() - 86400000).length >= 10) fail(429, 'ส่งสลิปหลายครั้งเกินไปในวันนี้ กรุณาติดต่อผู้จัด');
   return booking;

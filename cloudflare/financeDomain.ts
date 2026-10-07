@@ -81,7 +81,7 @@ export async function createEntry(docs: FinanceDocuments,v: Record<string,unknow
 }
 export async function updateEntry(docs:FinanceDocuments,id:string,v:Record<string,unknown>){
   if(v.action!=='settle'&&v.action!=='void')fail(400,'คำสั่งไม่ถูกต้อง');
-  const row=docs.finance.find(r=>r.id===id);if(!row||row.source!=='manual')fail(409,'รายการอัตโนมัติต้องจัดการจากระบบต้นทาง');
+  const row=docs.finance.find(r=>r.id===id);if(!row||row.source!=='manual'||row.provider==='stripe')fail(409,'รายการอัตโนมัติต้องจัดการจากระบบต้นทาง');
   if(v.action==='settle'&&row.status==='settled'||v.action==='void'&&row.status==='void')return row;
   const unit=row.allocationKey?(await revenueReport(docs)).units.find(u=>u.key===row.allocationKey):undefined;
   const payout=['coach_payout','organizer'].includes(row.category);

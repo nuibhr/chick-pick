@@ -5,6 +5,11 @@ import { TidbDocuments } from './tidbDocuments';
 import { organizerKey } from './pilotAuth';
 import type { MarketplaceData } from '../src/marketplaceTypes';
 import type { PilotContext } from './pilotDomain';
+import Stripe from 'stripe';
+import { prepareCheckout, attachCheckout, applyStripeSession } from './stripePayments';
+import { cancel } from './pilotDomain';
+import { lessonHoldExpired } from '../src/coachingTypes';
+const stripeAudit = { actorId: 'test', actorType: 'admin' as const, action: 'test.stripe', entityId: 'fixture' };
 
 test('one LINE player cannot gain extra seats or payments from concurrent bookings and different slips', async t => {
   const f = fixture(t), admin = await f.signIn();
@@ -214,10 +219,10 @@ function fixture(t: TestContext) {
   t.mock.method(TidbDocuments.prototype,'readDocument',async(key:string,fallback:unknown)=>structuredClone(docs.get(key)??fallback));
   t.mock.method(TidbDocuments.prototype,'readTransferAccount',async()=>structuredClone(docs.get('transfer-account')||null));
   t.mock.method(TidbDocuments.prototype,'updateDocument',async(key:string,fallback:unknown,mutate:(v:any)=>unknown)=>lock(async()=>{ const v=structuredClone(docs.get(key)??fallback); const result=await mutate(v); docs.set(key,v); return result; }));
-  t.mock.method(TidbDocuments.prototype,'updateMarketplace',async(mutate:(v:MarketplaceData,ctx:PilotContext)=>unknown)=>lock(async()=>{ const copy=structuredClone(data); const r=await mutate(copy,{account:docs.get('transfer-account') as any,enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)}); Object.assign(data,copy); return r; }));
+  t.mock.method(TidbDocuments.prototype,'updateMarketplace',async(mutate:(v:MarketplaceData,ctx:PilotContext)=>unknown)=>lock(async()=>{ const copy=structuredClone(data); const r=await mutate(copy,{account:docs.get('transfer-account') as any,enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,paymentProvider:(docs.get('worker-pilot') as any)?.paymentProvider || 'manual',closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)}); Object.assign(data,copy); return r; }));
   const financialSnapshot=()=>({marketplace:structuredClone(data),finance:structuredClone(docs.get('finance')||[]),coaching:structuredClone(docs.get('coaching')||[]),'coach-profiles':structuredClone(docs.get('coach-profiles')||[]),'coach-slots':structuredClone(docs.get('coach-slots')||[]),'revenue-config':structuredClone(docs.get('revenue-config')||[]),'revenue-settlements':structuredClone(docs.get('revenue-settlements')||[])});
   t.mock.method(TidbDocuments.prototype,'readFinance',async()=>financialSnapshot());
-  t.mock.method(TidbDocuments.prototype,'updateFinance',async(mutate:(v:any,ctx:PilotContext)=>unknown)=>lock(async()=>{const v=financialSnapshot();const result=await mutate(v,{account:docs.get('transfer-account') as any,enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)});Object.assign(data,v.marketplace);for(const key of ['finance','coaching','coach-profiles','coach-slots','revenue-config','revenue-settlements'])docs.set(key,v[key]);return result;}));
+  t.mock.method(TidbDocuments.prototype,'updateFinance',async(mutate:(v:any,ctx:PilotContext)=>unknown)=>lock(async()=>{const v=financialSnapshot();const result=await mutate(v,{account:docs.get('transfer-account') as any,enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,paymentProvider:(docs.get('worker-pilot') as any)?.paymentProvider || 'manual',closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)});Object.assign(data,v.marketplace);for(const key of ['finance','coaching','coach-profiles','coach-slots','revenue-config','revenue-settlements'])docs.set(key,v[key]);return result;}));
   const env:PilotEnv={TIDB_DATABASE_URL:'mysql://fixture:fixture@gateway01.ap-southeast-1.prod.aws.tidbcloud.com/test',LINE_CHANNEL_ID:'test-channel',VITE_LIFF_ID:'test-liff',ADMIN_SESSION_SECRET:'test-only-secret-for-cookie-signing',ADMIN_PAIRING_TOKEN:'TEST12CODEAB',RECEIPTS:{put:async(k,v)=>{images.set(k,v);},get:async k=>images.get(k)||null,delete:async k=>{images.delete(k);}}};
   const verify=async(token:string)=>{if(!token.startsWith('test-line-token-'))throw Error('invalid'); return {sub:token.slice(16),name:token.slice(16)};};
   const request=async(path:string,body?:unknown,headers:Record<string,string>={},method=body===undefined?'GET':'POST')=>pilotRequest(new Request('https://example.com'+path,{method,headers:{...(body===undefined?{}:{'Content-Type':'application/json'}),...headers},body:body===undefined?undefined:JSON.stringify(body)}),env,verify);
@@ -407,4 +412,139 @@ test('invitations are atomic, one use, expiring and revocable without sharing ow
   const current=await(await f.request('/api/finance/admin-team',{action:'invite',role:'viewer'},owner)).json();
   assert.equal((await f.request('/api/finance/auth',{idToken:'test-line-token-guest-c',pairingToken:current.code},{Origin:'https://evil.example'})).status,403);
   assert.equal((await f.request('/api/finance/admin-team',{action:'invite',role:'operator'},{...owner,Origin:'https://evil.example'})).status,403);
+});
+
+test('one staff member can combine operations and finance without gaining owner privileges', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  const issued = await (await f.request('/api/finance/admin-team', { action: 'invite', roles: ['finance', 'operator', 'finance'] }, owner)).json();
+  assert.deepEqual(issued.invitation.roles, ['operator', 'finance']);
+  const login = await f.request('/api/finance/auth', { idToken: 'test-line-token-combined', pairingToken: issued.code });
+  assert.deepEqual((await login.json()).roles, ['operator', 'finance']);
+  const staff = { Cookie: login.headers.get('set-cookie')!.split(';')[0] };
+  assert.equal((await f.request('/api/marketplace', undefined, staff)).status, 200);
+  assert.equal((await f.request('/api/finance/report', undefined, staff)).status, 200);
+  assert.equal((await f.request('/api/finance/entries', { requestId: crypto.randomUUID(), type: 'expense', category: 'other_expense', description: 'test', counterparty: 'test', amount: 100, date: new Date().toISOString().slice(0,10), method: 'transfer', status: 'pending', reference: '' }, staff)).status, 201);
+  for (const path of ['/api/marketplace/setup/payment', '/api/marketplace/setup/pilot', '/api/finance/revenue/config', '/api/finance/admin-team']) assert.equal((await f.request(path, {}, staff)).status, 403);
+  for (const roles of [[], ['owner'], ['operator', 'unknown'], 'operator']) assert.equal((await f.request('/api/finance/admin-team', { action: 'invite', roles }, owner)).status, 400);
+  const team = await (await f.request('/api/finance/admin-team', undefined, owner)).json();
+  assert.equal((await f.request('/api/finance/admin-team', { action: 'role', id: team.members[0].id, roles: ['operator'] }, owner)).status, 200);
+  assert.equal((await f.request('/api/marketplace', undefined, staff)).status, 401);
+  const refreshed = await f.request('/api/finance/auth', { idToken: 'test-line-token-combined' });
+  const reduced = { Cookie: refreshed.headers.get('set-cookie')!.split(';')[0] };
+  assert.equal((await f.request('/api/marketplace', undefined, reduced)).status, 200);
+  assert.equal((await f.request('/api/finance/report', undefined, reduced)).status, 403);
+  // Legacy rows without roles still work; invalid present arrays cannot fall back to a privileged role.
+  const saved = f.docs.get('worker-admin-team') as any; delete saved.members[0].roles;
+  assert.equal((await f.request('/api/marketplace', undefined, reduced)).status, 200);
+  saved.members[0].roles = ['owner'];
+  assert.equal((await f.request('/api/marketplace', undefined, reduced)).status, 401);
+});
+
+test('Stripe Checkout uses server price and LINE ownership, no secrets or fake paid redirect', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  f.env.STRIPE_SECRET_KEY = 'sk_test_fixture'; f.env.STRIPE_WEBHOOK_SECRET = 'whsec_fixture'; f.env.PUBLIC_APP_URL = 'https://example.com';
+  assert.equal((await f.request('/api/marketplace/setup/payment', { paymentProvider: 'stripe' }, owner)).status, 200);
+  f.docs.set('court-venues', [{ id: 'court', name: 'สนาม', area: 'ขอนแก่น', address: '', active: true }]);
+  assert.equal((await f.request('/api/marketplace/setup/pilot', { bookingEnabled: true }, owner)).status, 200);
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
+  assert.equal((await f.request('/api/player/payments/checkout', { kind: 'game', id }, f.player('b'))).status, 404);
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url: any, init: any) => {
+    assert.equal(new URL(String(url)).host, 'api.stripe.com');
+    assert.equal(init.method, 'POST'); calls++;
+    const params = new URLSearchParams(init.body);
+    assert.equal(params.get('line_items[0][price_data][unit_amount]'), '19000');
+    assert.equal(params.get('payment_method_types[0]'), 'promptpay');
+    assert.equal(params.get('client_reference_id'), id);
+    assert.equal(params.get('success_url'), 'https://example.com/miniapp?organizer=0&view=tickets&payment=returned');
+    return new Response(JSON.stringify({ id: 'cs_fixture', url: 'https://checkout.stripe.com/c/pay/cs_fixture', amount_total: 19000, currency: 'thb', livemode: false, expires_at: Math.floor(Date.now()/1000)+1860, metadata: { attemptId: params.get('metadata[attemptId]') } }), { headers: { 'Content-Type': 'application/json' } });
+  });
+  assert.equal((await f.request('/api/player/payments/checkout', { kind: 'game', id, amount: 1, playerId: 'forged' }, f.player('a'))).status, 200);
+  assert.equal(calls, 1); assert.equal(f.data.bookings[0].paidAt, undefined);
+  assert.equal((await f.request('/api/player/bookings/' + id + '/cancel', {}, f.player('a'))).status, 409);
+  const publicConfig = await (await f.request('/api/player/config')).text(); assert.doesNotMatch(publicConfig, /sk_test|whsec/);
+  assert.equal((await f.request('/api/stripe/webhook', {}, {}, 'POST')).status, 400);
+  assert.equal(calls, 1);
+});
+
+test('verified Stripe results are idempotent, charge fees before shares, require admission, and isolate test payments', async t => {
+  const f = fixture(t); await f.signIn();
+  f.data.bookings.push({ id: 'booking', sessionId: 'game', playerId: 'line:a', playerName: 'a', title: 'Test', amount: 19000, createdAt: new Date().toISOString(), admissionStatus: 'pending' });
+  const makeSession = (docs: any, mode: 'live' | 'test', intent = 'pi_fixture') => {
+    const p = prepareCheckout(docs, {sub:'a',name:'a'}, 'game', 'booking', mode).payment;
+    const session = { id: 'cs_' + mode, url: 'https://checkout.stripe.com/c/pay/test', metadata: { app:'chick-pick',kind:'game',bookingId:'booking',attemptId:p.attemptId }, client_reference_id:'booking',currency:'thb',amount_total:19000,livemode:mode==='live',expires_at:Math.floor(Date.now()/1000)+1860,status:'complete',payment_status:'paid',payment_intent:{id:intent,status:'succeeded',currency:'thb',amount_received:19000,latest_charge:{id:'ch_test',created:Math.floor(Date.now()/1000),payment_method_details:{type:'promptpay'},balance_transaction:{currency:'thb',fee:250}}}} as unknown as Stripe.Checkout.Session;
+    attachCheckout(docs,'game','booking',p.attemptId,session); return session;
+  };
+  const testDocs = await new TidbDocuments(f.env.TIDB_DATABASE_URL!).readFinance();
+  const testSession = makeSession(testDocs,'test');
+  assert.deepEqual(applyStripeSession(testDocs,testSession,'test','evt_test'),{testPaid:true});
+  assert.equal(testDocs.marketplace.bookings[0].paidAt,undefined); assert.equal(testDocs.finance.length,0);
+  const docs = await new TidbDocuments(f.env.TIDB_DATABASE_URL!).readFinance(), session = makeSession(docs,'live');
+  assert.throws(()=>applyStripeSession(docs,{...session,amount_total:1},'live','evt_bad'));
+  assert.throws(()=>applyStripeSession(docs,{...session,livemode:false},'live','evt_bad'));
+  assert.deepEqual(applyStripeSession(docs,session,'live','evt_1'),{paid:true});
+  assert.deepEqual(applyStripeSession(docs,session,'live','evt_1'),{repeated:true});
+  assert.equal(docs.finance.length,1); assert.equal(docs.finance[0].amount,250); assert.equal(docs.finance[0].allocationKey,'game:game');
+  assert.equal(docs.marketplace.bookings[0].admissionStatus,'pending');
+  assert.throws(()=>cancel(docs.marketplace,{sub:'a',name:'a'},'booking'));
+  const late = await new TidbDocuments(f.env.TIDB_DATABASE_URL!).readFinance(), lateSession = makeSession(late,'live','pi_late');
+  late.marketplace.bookings[0].cancelledAt = new Date().toISOString();
+  assert.deepEqual(applyStripeSession(late,lateSession,'live','evt_late'),{requiresReview:true});
+  assert.equal(late.marketplace.bookings[0].paidAt,undefined); assert.equal(late.marketplace.bookings[0].stripe!.status,'requires_review');
+});
+
+test('signed Stripe webhook verifies the retrieved transaction, retries missing fees and rejects replay alterations', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  Object.assign(f.env, { STRIPE_SECRET_KEY: 'sk_live_fixture', STRIPE_WEBHOOK_SECRET: 'whsec_fixture', PUBLIC_APP_URL: 'https://example.com' });
+  f.data.bookings.push({ id: 'webhook-booking', sessionId: 'game', playerId: 'line:a', playerName: 'a', title: 'Test', amount: 19000, createdAt: new Date().toISOString(), admissionStatus: 'pending' });
+  const db = new TidbDocuments(f.env.TIDB_DATABASE_URL!);
+  const p = await db.updateFinance(docs => prepareCheckout(docs, { sub: 'a', name: 'a' }, 'game', 'webhook-booking', 'live').payment, stripeAudit);
+  let session = { id: 'cs_webhook', url: 'https://checkout.stripe.com/c/pay/test', metadata: { app: 'chick-pick', kind: 'game', bookingId: 'webhook-booking', attemptId: p.attemptId }, client_reference_id: 'webhook-booking', currency: 'thb', amount_total: 19000, livemode: true, expires_at: Math.floor(Date.now()/1000)+1860, status: 'complete', payment_status: 'paid', payment_intent: { id: 'pi_webhook', status: 'succeeded', currency: 'thb', amount_received: 19000, latest_charge: { created: Math.floor(Date.now()/1000), payment_method_details: { type: 'promptpay' }, balance_transaction: null as any } } };
+  await db.updateFinance(docs => attachCheckout(docs, 'game', 'webhook-booking', p.attemptId, session as any), stripeAudit);
+  let reads = 0;
+  t.mock.method(globalThis, 'fetch', async (url: any, init: any) => {
+    assert.equal(new URL(String(url)).host, 'api.stripe.com'); assert.equal(init.method, 'GET'); reads++;
+    assert.match(String(url), /checkout\/sessions\/cs_webhook/);
+    return new Response(JSON.stringify(session), { headers: { 'Content-Type': 'application/json' } });
+  });
+  const stripe = new Stripe('sk_test_fixture');
+  const send = (livemode = true, changes = '') => {
+    const raw = JSON.stringify({ id: 'evt_fixture', type: 'checkout.session.completed', livemode, data: { object: { id: session.id, metadata: session.metadata } } });
+    const signature = stripe.webhooks.generateTestHeaderString({ payload: raw, secret: f.env.STRIPE_WEBHOOK_SECRET! });
+    return pilotRequest(new Request('https://example.com/api/stripe/webhook', { method: 'POST', headers: { 'Stripe-Signature': signature }, body: raw + changes }), f.env, f.verify);
+  };
+  assert.equal((await send(true, ' ')).status, 400); assert.equal(reads, 0);
+  assert.equal((await send(false)).status, 400); assert.equal(reads, 0);
+  assert.equal((await send()).status, 503); assert.equal(f.data.bookings[0].paidAt, undefined);
+  session.payment_intent.latest_charge.balance_transaction = { currency: 'thb', fee: 250 };
+  session.amount_total = 1;
+  assert.equal((await send()).status, 409); assert.equal(f.data.bookings[0].paidAt, undefined);
+  session.amount_total = 19000;
+  const results = await Promise.all([send(), send()]); assert.deepEqual(results.map(r => r.status), [200, 200]);
+  assert.equal(f.data.bookings[0].stripe!.status, 'paid'); assert.equal(f.data.bookings[0].admissionStatus, 'pending');
+  const report = await db.readFinance(); assert.equal(report.finance.length, 1); assert.equal(report.finance[0].amount, 250);
+  assert.equal((await f.request('/api/finance/entries/stripe_fee_pi_webhook', { action: 'void', reason: 'override provider fee' }, owner)).status, 409);
+  const publicBooking = (await db.readFinance()).marketplace.bookings[0];
+  assert.ok(publicBooking.paidAt);
+});
+
+test('coach Stripe booking derives amount from its slot and holds it until Stripe confirms expiry', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  Object.assign(f.env, { STRIPE_SECRET_KEY: 'sk_test_fixture', STRIPE_WEBHOOK_SECRET: 'whsec_fixture', PUBLIC_APP_URL: 'https://example.com' });
+  f.docs.set('worker-pilot', { bookingEnabled: true, paymentProvider: 'stripe' });
+  const coach = await (await f.request('/api/coaching/coaches', { name: 'Test', specialty: 'Test', bio: '', venue: 'Court', hourlyRate: 550, bookingFee: 100, active: true }, owner)).json();
+  const start = new Date(Math.ceil((Date.now() + 86400000) / 1800000) * 1800000).toISOString();
+  const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start, hours: 2, status: 'open' }, owner)).json();
+  const response = await f.request('/api/player/lessons', { slotId: slot.id, amount: 1 }, f.player('a'));
+  assert.equal(response.status, 201); const lesson = await response.json();
+  const own = await (await f.request('/api/player/lessons', undefined, f.player('a'))).json();
+  assert.equal(own.lessons[0].amount, 110000);
+  const db = new TidbDocuments(f.env.TIDB_DATABASE_URL!);
+  const p = await db.updateFinance(docs => prepareCheckout(docs, { sub: 'player-a', name: 'a' }, 'coaching', lesson.id, 'test').payment, stripeAudit);
+  assert.equal(p.amount, 110000);
+  await db.updateFinance(docs => { docs.coaching[0].holdExpiresAt = new Date(Date.now() - 1000).toISOString(); }, stripeAudit);
+  let docs = await db.readFinance(); assert.equal(lessonHoldExpired(docs.coaching[0]), false);
+  const session = { id: 'cs_expired', metadata: { app: 'chick-pick', kind: 'coaching', bookingId: lesson.id, attemptId: p.attemptId }, client_reference_id: lesson.id, amount_total: 110000, currency: 'thb', livemode: false, status: 'expired', payment_status: 'unpaid' } as any;
+  await db.updateFinance(docs => applyStripeSession(docs, session, 'test', 'evt_expired'), stripeAudit);
+  docs = await db.readFinance(); assert.equal(lessonHoldExpired(docs.coaching[0]), true); assert.equal(docs.coaching[0].paidAt, undefined);
 });

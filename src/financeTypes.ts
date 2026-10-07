@@ -10,5 +10,6 @@ export type FinanceRow = {
   source: 'manual' | 'coaching' | 'game'; reference: string; createdAt: string;
   history: { at: string; action: string; reason?: string }[];
   allocationKey?: string;
+  provider?: 'stripe';
 };
 export type FinanceReport = { pilot?: boolean; rows: FinanceRow[]; summary: { income: number; expense: number; net: number; pendingIncome: number; pendingExpense: number }; daily: { date: string; income: number; expense: number }[]; breakdown: { category: FinanceCategory; amount: number; type: 'income' | 'expense' }[] };

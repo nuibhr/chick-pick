@@ -291,6 +291,9 @@
  .pa-transfer-instructions span { font-size: 11px; }
  .pa-transfer-instructions strong { letter-spacing: 1px; font-size: 20px; }
  .pa-transfer-instructions small { font-size: 10px; line-height: 1.6; color: #768369; }
+ .pa-transfer-instructions button { min-height: 44px; padding: 10px 14px; border: 1px solid var(--pa-line); border-radius: 11px; background: var(--pa-paper); color: var(--pa-text); font: inherit; font-size: 12px; }
+ .pa-transfer-instructions button.pa-primary { border-color: var(--pa-accent); background: var(--pa-accent); color: #fff; font-weight: 750; }
+ .pa-transfer-instructions button:disabled { opacity: .55; }
 
 /* Device theme and motion are preferences, independent of booking access. */
 html[data-player-theme="light"] { color-scheme: light; }

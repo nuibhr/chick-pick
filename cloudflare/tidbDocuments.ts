@@ -55,7 +55,7 @@ export class TidbDocuments {
       const docs = this.financeDocuments([...market, ...(rows || [])]);
       const settingsRows = (await tx.execute('SELECT document_key, payload FROM app_documents WHERE document_key IN (?, ?) ORDER BY document_key FOR UPDATE', ['transfer-account', 'worker-pilot'])).rows as Row[] | null;
       const settings = new Map((settingsRows || []).map(row => [String(row.document_key), typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload]));
-      const context: PilotContext = { enabled: settings.get('worker-pilot')?.bookingEnabled === true, account: settings.get('transfer-account') || null, closed: docs['revenue-settlements'].map(s => s.key) };
+      const context: PilotContext = { enabled: settings.get('worker-pilot')?.bookingEnabled === true, paymentProvider: settings.get('worker-pilot')?.paymentProvider === 'stripe' ? 'stripe' : 'manual', account: settings.get('transfer-account') || null, closed: docs['revenue-settlements'].map(s => s.key) };
       const before = new Map(financeKeys.map(key => [key, JSON.stringify(docs[key])]));
       const result = await mutate(docs, context);
       for (const key of financeKeys) if (JSON.stringify(docs[key]) !== before.get(key)) await tx.execute('UPDATE app_documents SET payload = ?, version = version + 1 WHERE document_key = ?', [JSON.stringify(docs[key]), key]);
@@ -72,7 +72,7 @@ export class TidbDocuments {
       if (pilot) {
         const rows = (await tx.execute('SELECT document_key, payload FROM app_documents WHERE document_key IN (?, ?, ?) ORDER BY document_key FOR UPDATE', ['transfer-account', 'worker-pilot', 'revenue-settlements'])).rows as Row[] | null;
         const values = new Map((rows || []).map(row => [String(row.document_key), typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload]));
-        context = { account: values.get('transfer-account') || null, enabled: values.get('worker-pilot')?.bookingEnabled === true, closed: (values.get('revenue-settlements') || []).map((row: { key: string }) => row.key) };
+        context = { account: values.get('transfer-account') || null, enabled: values.get('worker-pilot')?.bookingEnabled === true, paymentProvider: values.get('worker-pilot')?.paymentProvider === 'stripe' ? 'stripe' : 'manual', closed: (values.get('revenue-settlements') || []).map((row: { key: string }) => row.key) };
       }
       const result = await mutate(data, context);
       await tx.execute('UPDATE app_documents SET payload = ?, version = version + 1 WHERE document_key = ?', [JSON.stringify(data), 'marketplace']);

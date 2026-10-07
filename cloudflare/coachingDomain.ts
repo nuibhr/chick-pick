@@ -4,6 +4,7 @@ import type { ReceiptSubmission } from '../src/marketplaceTypes';
 import type { FinanceDocuments } from './financeDomain';
 import { fail, type Actor } from './pilotDomain';
 import { recordVerifiedTransfer } from './receiptVerification';
+import { stripeLocksPayment, stripePublicView } from '../src/paymentTypes';
 
 const active = (e: Enrollment) => !e.cancelledAt && !lessonHoldExpired(e) && e.lessons.some(l => l.status !== 'cancelled');
 const reserved = (docs: FinanceDocuments, slot: CoachSlot) => docs.coaching.some(e => e.coachId === slot.coachId && active(e) && e.lessons.some(l => l.status !== 'cancelled' && Date.parse(l.start) < Date.parse(slot.start) + slot.hours * 3600000 && Date.parse(l.start) + l.hours * 3600000 > Date.parse(slot.start)));
@@ -51,14 +52,15 @@ export function changeCoachSlot(docs: FinanceDocuments, id: string, v: Record<st
   if (!['open', 'blocked'].includes(String(v.status))) fail(400, 'เลือกเปิดรับหรือหยุดสอน');
   slot.status = v.status as 'open' | 'blocked'; return slot;
 }
-export function bookLesson(docs: FinanceDocuments, actor: Actor, slotId: unknown, enabled: boolean, account: Enrollment['transferAccount']) {
-  if (!enabled || !account) fail(503, 'ยังไม่เปิดรับจองหรือตั้งบัญชีรับโอน');
+export function bookLesson(docs: FinanceDocuments, actor: Actor, slotId: unknown, enabled: boolean, account: Enrollment['transferAccount'], stripeReady = false) {
+  if (!enabled || !account && !stripeReady) fail(503, 'ยังไม่เปิดรับจองหรือตั้งช่องทางชำระเงิน');
   const slot = slots(docs).find(s => s.id === slotId), coach = profiles(docs).find(c => c.id === slot?.coachId && c.active !== false);
   if (!slot || !coach) fail(404, 'ไม่พบช่วงเวลาของโค้ช');
   const existing = docs.coaching.find(e => e.playerId === 'line:' + actor.sub && active(e) && e.lessons.some(l => l.slotId === slot.id));
   if (existing) return { id: existing.id, repeated: true };
   if (coach.bookingFee === undefined || Math.round(coach.bookingFee * 100) > Math.round(slot.price * 100)) fail(409, 'เจ้าของต้องตั้งค่าหัวคิวที่ไม่เกินค่าเรียนก่อนเปิดจอง');
   if (slot.status !== 'open' || Date.parse(slot.start) < Date.now() + 1800000 || reserved(docs, slot)) fail(409, 'ช่วงเวลานี้ปิดรับหรือมีผู้จองแล้ว');
+  if (stripeReady && (Date.parse(slot.start) < Date.now() + 35 * 60000 || slot.price < 10 || slot.price > 100000)) fail(409, 'PromptPay ต้องจองก่อนเริ่มอย่างน้อย 35 นาที และยอด 10–100,000 บาท');
   if (docs.coaching.filter(e => e.playerId === 'line:' + actor.sub && active(e) && e.payment !== 'paid').length >= 3) fail(409, 'มีนัดรอชำระครบ 3 นัดแล้ว ส่งสลิปหรือยกเลิกนัดเดิมก่อน');
   if (docs.coaching.some(e => e.playerId === 'line:' + actor.sub && active(e) && e.lessons.some(l => l.status === 'scheduled' && Date.parse(l.start) < Date.parse(slot.start) + slot.hours * 3600000 && Date.parse(l.start) + l.hours * 3600000 > Date.parse(slot.start)))) fail(409, 'ทับกับเวลาเรียนที่คุณจองไว้');
   const id = crypto.randomUUID();
@@ -71,7 +73,7 @@ export function ownLesson(docs: FinanceDocuments, actor: Actor, id: string) {
 }
 export function lessonReceiptEligibility(docs: FinanceDocuments, actor: Actor, id: string) {
   const e = ownLesson(docs, actor, id);
-  if (closed(docs, id) || !active(e) || e.payment === 'paid' || e.receipts?.at(-1)?.status === 'pending') fail(409, 'รายการนี้ปิดรับสลิปหรือมีสลิปรอตรวจ');
+  if (closed(docs, id) || !active(e) || e.payment === 'paid' || stripeLocksPayment(e.stripe) || e.receipts?.at(-1)?.status === 'pending') fail(409, 'รายการนี้ปิดรับสลิป มี QR Stripe หรือมีสลิปรอตรวจ');
   if (!e.transferAccount) fail(409, 'ไม่มีบัญชีรับโอน ติดต่อผู้จัด');
   if ((e.receipts || []).filter(r => Date.parse(r.submittedAt) > Date.now() - 86400000).length >= 10) fail(429, 'ส่งสลิปหลายครั้งเกินไป');
   return e;
@@ -97,7 +99,7 @@ export function cancelLesson(docs: FinanceDocuments, actor: Actor, id: string, a
   const e = admin ? docs.coaching.find(e => e.id === id) : ownLesson(docs, actor, id);
   if (!e) fail(404, 'ไม่พบการจอง');
   if (e.cancelledAt) return { repeated: true };
-  if (closed(docs, id) || e.payment === 'paid' || e.receipts?.at(-1)?.status === 'pending') fail(409, 'มีเงินหรือสลิปรอตรวจ ติดต่อผู้จัดเรื่องคืนเงินก่อนยกเลิก');
+  if (closed(docs, id) || e.payment === 'paid' || stripeLocksPayment(e.stripe) || e.receipts?.at(-1)?.status === 'pending') fail(409, 'มีเงิน สลิปรอตรวจ หรือ QR Stripe ที่ยังไม่ปิด ติดต่อผู้จัดก่อนยกเลิก');
   if (e.lessons.some(l => l.status !== 'scheduled' || Date.parse(l.start) <= Date.now())) fail(409, 'เริ่มเรียนแล้ว ยกเลิกไม่ได้');
   e.cancelledAt = new Date().toISOString(); e.lessons.forEach(l => l.status = 'cancelled'); return { repeated: false };
 }
@@ -111,5 +113,5 @@ export function completeLesson(docs: FinanceDocuments, id: string) {
 
 export function lessonView(e: Enrollment) {
   const receipt = e.receipts?.at(-1);
-  return { kind: 'coaching' as const, id: e.id, sessionId: e.lessons[0]?.slotId || '', title: e.title, startsAt: e.lessons[0]?.start, venue: e.venue || '', hours: e.totalHours, amount: Math.round(e.amount * 100), createdAt: e.createdAt, holdExpiresAt: e.holdExpiresAt || null, paidAt: e.paidAt || null, admissionStatus: e.payment === 'paid' ? 'approved' : 'pending', cancelledAt: e.cancelledAt || (lessonHoldExpired(e) ? e.holdExpiresAt : null), transferAccount: e.transferAccount || null, completed: e.lessons.every(l => l.status === 'completed'), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, rejectReason: receipt.rejectReason || null } : null };
+  return { kind: 'coaching' as const, id: e.id, sessionId: e.lessons[0]?.slotId || '', title: e.title, startsAt: e.lessons[0]?.start, venue: e.venue || '', hours: e.totalHours, amount: Math.round(e.amount * 100), createdAt: e.createdAt, holdExpiresAt: e.holdExpiresAt || null, paidAt: e.paidAt || null, admissionStatus: e.payment === 'paid' ? 'approved' : 'pending', cancelledAt: e.cancelledAt || (lessonHoldExpired(e) ? e.holdExpiresAt : null), transferAccount: e.transferAccount || null, completed: e.lessons.every(l => l.status === 'completed'), stripe: stripePublicView(e.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, rejectReason: receipt.rejectReason || null } : null };
 }

@@ -1,10 +1,10 @@
-export type BookingReadiness = { transferAccountConfigured: boolean; receiptStorageConfigured: boolean; activeVenueCount: number; futureOpenPlayCount: number; futureCoachSlotCount: number; openPlayReady: boolean; coachingReady: boolean; readyToOpen: boolean };
+export type BookingReadiness = { paymentReady?: boolean; paymentProvider?: 'manual' | 'stripe'; stripeConfigured?: boolean; transferAccountConfigured: boolean; receiptStorageConfigured: boolean; activeVenueCount: number; futureOpenPlayCount: number; futureCoachSlotCount: number; openPlayReady: boolean; coachingReady: boolean; readyToOpen: boolean };
 
 export default function BookingLaunchSteps({ readiness, canConfigure }: { readiness: BookingReadiness; canConfigure: boolean }) {
   const steps = [
     { title: 'เพิ่มสนามจริง', detail: `สนามเปิดแสดง ${readiness.activeVenueCount} แห่ง`, done: readiness.activeVenueCount > 0, href: '/miniapp?organizer=1&workspace=operations&section=venues', action: 'จัดการสนาม' },
     { title: 'สร้างก๊วนที่จะเปิด', detail: `ก๊วนอนาคตในสนามที่เปิดแสดง ${readiness.futureOpenPlayCount} รอบ`, done: readiness.futureOpenPlayCount > 0, href: '/miniapp?organizer=1&workspace=operations&section=games', action: 'สร้างก๊วน' },
-    { title: 'ตั้งบัญชีและเปิดรับ', detail: readiness.transferAccountConfigured ? 'ตั้งบัญชีแล้ว · เปิดเมื่อข้อมูลรอบถูกต้อง' : 'เจ้าของกรอกบัญชีรับโอนก่อนเปิดรับ', done: readiness.transferAccountConfigured, href: '/miniapp?organizer=1&workspace=platform&section=settings', action: 'บัญชีและการเปิดรับ' },
+    { title: 'ตั้งช่องทางชำระและเปิดรับ', detail: readiness.paymentProvider === 'stripe' ? (readiness.stripeConfigured ? 'ตั้งค่า Stripe แล้ว · ตรวจโหมดก่อนเปิดรับ' : 'เจ้าของต้องตั้งค่า Stripe และ webhook') : readiness.transferAccountConfigured ? 'ตั้งบัญชีแล้ว · เปิดเมื่อข้อมูลรอบถูกต้อง' : 'เจ้าของกรอกบัญชีรับโอนก่อนเปิดรับ', done: readiness.paymentReady ?? readiness.transferAccountConfigured, href: '/miniapp?organizer=1&workspace=platform&section=settings', action: 'บัญชีและการเปิดรับ' },
   ];
   return <section className="wp-launch" aria-label="ขั้นตอนเปิดจอง Open Play"><div><small>เริ่มเปิด OPEN PLAY</small><h2>เตรียมก๊วนแรกให้จองได้</h2><p>หนึ่งบัญชี LINE จองได้หนึ่งที่นั่งต่อก๊วน · ผู้จัดตรวจเงินและเลือกคนเข้าสนาม</p></div><ol>{steps.map((step, index) => <li key={step.title}><span aria-hidden="true">{step.done ? '✓' : index + 1}</span><div><strong>{step.title}</strong><p>{step.detail}</p>{index < 2 || canConfigure ? <a href={step.href}>{step.action} →</a> : <small>ให้เจ้าของตั้งค่า</small>}</div></li>)}</ol></section>;
 }

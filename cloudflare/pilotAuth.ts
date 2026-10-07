@@ -1,10 +1,10 @@
 import { TidbDocuments } from './tidbDocuments';
 import { fail } from './pilotDomain';
 import { emptyTeam, teamKey, type Team } from './adminTeam';
-import { isStaffRole, type AdminRole } from '../src/adminRoles';
+import { memberRoles, type AdminRole } from '../src/adminRoles';
 
 export type Organizer = { sub: string; name: string; linkedAt: string };
-export type AdminIdentity = Organizer & { role: AdminRole; version?: string };
+export type AdminIdentity = Organizer & { role: AdminRole; roles: AdminRole[]; version?: string };
 export const organizerKey = 'worker-organizer';
 const encoder = new TextEncoder();
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -32,11 +32,11 @@ export async function authenticateAdmin(request: Request, secret: string | undef
     const claims = JSON.parse(atob(payload));
     const owner = await db.readDocument<Partial<Organizer>>(organizerKey, {});
     if (!owner.sub || !Number.isFinite(claims.exp) || claims.exp <= Date.now() || claims.exp > Date.now() + 1800000) throw Error('expired');
-    if (claims.sub === owner.sub) return { ...owner, role: 'owner' } as AdminIdentity;
+    if (claims.sub === owner.sub) return { ...owner, role: 'owner', roles: ['owner'] } as AdminIdentity;
     const team = await db.readDocument<Team>(teamKey, emptyTeam());
-    const member = team.members.find(m => m.sub === claims.sub && m.active && m.version === claims.version && isStaffRole(m.role));
+    const member = team.members.find(m => m.sub === claims.sub && m.active && m.version === claims.version && memberRoles(m).length > 0);
     if (!member) throw Error('revoked');
-    return { sub: member.sub, name: member.name, role: member.role, version: member.version, linkedAt: member.joinedAt } as AdminIdentity;
+    return { sub: member.sub, name: member.name, role: memberRoles(member)[0], roles: memberRoles(member), version: member.version, linkedAt: member.joinedAt } as AdminIdentity;
   } catch { return fail(401, 'สิทธิ์ผู้จัดหมดอายุหรือไม่ถูกต้อง กรุณาเข้า LINE ใหม่'); }
 }
 export async function limitAuth(db: TidbDocuments, ip: string, upload = false) {
