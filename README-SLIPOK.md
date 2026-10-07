@@ -2,6 +2,8 @@
 
 Cloudflare Worker ใช้โอนเงินและแนบสลิปสำหรับการจองใหม่ ทั้ง Open Play และโค้ช ปิด API สร้าง Stripe Checkout ใหม่แล้ว ไม่มีช่องกรอก Secret ในหน้าแอป คีย์อ่านจาก `env.SLIPOK_API_KEY` ฝั่งเซิร์ฟเวอร์เท่านั้น Node preview ไม่ได้เพิ่ม SlipOK ในรอบนี้
 
+สถานะล่าสุด: ตั้ง Worker Secret แล้ว ตรวจ SlipOK `/quota` จริงได้ HTTP 200 และโควต้าคงเหลือ 100 ณ เวลาตรวจ Worker แสดง `slipokConfigured:true` และ player config แสดง `slipVerification:slipok` ยังไม่ได้ตรวจสลิปจริงหรือทดสอบการอนุมัติเงินครบกระบวนการจากมือถือ
+
 ## ตั้งค่า
 
 - `SLIPOK_BRANCH_ID=77946` อยู่ใน `wrangler.tidb.jsonc` เรียกเฉพาะ HTTPS `https://api.slipok.com/api/line/apikey/77946`

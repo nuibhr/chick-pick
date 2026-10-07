@@ -2,7 +2,7 @@
 
 ## Current hosted app — 7 October 2026
 
-The Cloudflare + TiDB app uses LINE owner/staff authentication, real Open Play and coach booking APIs, and private slip review with server-side SlipOK verification when configured. Staff can combine roles such as operator + finance; only the owner changes rates, payment settings and team access. New Stripe Checkout is retired; old Stripe records and signed webhooks remain for reconciliation. SlipOK credentials and a real LINE-member slip test are still required. The Node preview remains a separate local backend.
+The Cloudflare + TiDB app uses LINE owner/staff authentication, real Open Play and coach booking APIs, and private slip review with server-side SlipOK verification. Staff can combine roles such as operator + finance; only the owner changes rates, payment settings and team access. New Stripe Checkout is retired; old Stripe records and signed webhooks remain for reconciliation. The SlipOK Worker secret is configured and its real quota API connection is verified; a real LINE-member booking, slip upload and admin approval test is still required. The Node preview remains a separate local backend.
 
 See [README-SLIPOK.md](README-SLIPOK.md) for the active payment setup and limitations, [README-STRIPE.md](README-STRIPE.md) for legacy Stripe records, and [LAUNCH-REVIEW-2026-10-07.md](LAUNCH-REVIEW-2026-10-07.md) for deployment evidence.
 

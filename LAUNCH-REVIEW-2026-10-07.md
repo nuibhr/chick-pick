@@ -4,11 +4,13 @@
 
 Deploy Worker `chick-pick-tidb-staging` เวอร์ชัน `8673ad20-60df-4941-96be-3b18ed2aae90` สำเร็จ การจองใหม่ทั้ง Open Play และโค้ชใช้การโอนเงินและแนบสลิป ไม่มีช่องกรอก Secret ในแอป อ่านคีย์จาก `env.SLIPOK_API_KEY` เท่านั้น สาขา `77946` เก็บไว้ใน Worker configuration ไม่เปลี่ยน TiDB/LINE หรือข้อมูลการจองเดิม
 
-ตรวจ `/api/health` และ `/api/player/config` หลัง deploy ได้ HTTP 200: TiDB/LINE/admin/receipt storage พร้อม, `bookingEnabled:true`, `paymentProvider:manual`, `stripeRetired:true` และ **`slipokConfigured:false`** ยังไม่มี `SLIPOK_API_KEY` บน Worker จึงยังไม่เรียกว่าตรวจสลิปจริงกับ SlipOK สำเร็จ ขณะนี้แอดมินตรวจสลิปเองได้ตามเดิม `/api/marketplace/setup/slipok` เมื่อไม่มี session ได้ 401
+หลังผู้ใช้บันทึกคีย์ใน `.env` ตั้ง `SLIPOK_API_KEY` เป็น Cloudflare Worker Secret สำเร็จ โดยส่งเฉพาะคีย์นี้ ไม่ส่ง env ทั้งไฟล์และไม่เก็บคีย์ใน Git ตรวจ SlipOK `/quota` ด้วยคีย์จริงได้ HTTP 200, `success:true`, โควต้าคงเหลือ 100 และ overQuota 0 ณ เวลาตรวจ การตรวจนี้ไม่ใช่การตรวจสลิปหรือการยืนยันบัญชีรับเงิน
+
+ตรวจ `/api/health` และ `/api/player/config` บน Worker หลังตั้ง Secret ได้ HTTP 200: TiDB/LINE/admin/receipt storage พร้อม, `bookingEnabled:true`, `paymentProvider:manual`, `stripeRetired:true`, **`slipokConfigured:true`** และ **`slipVerification:slipok`** การอัปโหลดใหม่จึงเข้ากระบวนการตรวจ SlipOK ก่อนรอแอดมินอนุมัติ `/api/marketplace/setup/slipok` เมื่อไม่มี session ได้ 401; ยังไม่ได้ทดสอบ endpoint นี้ด้วย session ของเจ้าของ
 
 ตัวเชื่อมตรวจยอด บัญชีและธนาคารผู้รับ เวลาโอน และกันเลขธุรกรรมซ้ำข้าม Open Play/โค้ชใน transaction ผลตรวจผ่านยังต้องให้แอดมินอนุมัติก่อนลงเงินและค่าคอม ผู้จัดเลือกคนเข้าสนามเอง ผลไม่ผ่านหรือยังตรวจไม่เสร็จไม่สามารถฝืนอนุมัติผ่าน API ได้ รายละเอียดการตั้งค่าและข้อจำกัดอยู่ใน [README-SLIPOK.md](README-SLIPOK.md)
 
-TypeScript, tests **68/68**, production frontend/Worker build และ `git diff --check` ผ่าน Bundle gzip 113.85 KiB; มีคำเตือนขนาด chunk ภาพ 3D เดิม Tests ใช้ SlipOK fixtures/API mocks ไม่มีการโอนเงินจริงหรือสร้างข้อมูลทดสอบในฐานข้อมูลจริง ยังต้องใส่คีย์ ตรวจโควต้า และทดลองผู้เล่น LINE ส่งสลิปจริงก่อนเปิดใช้การตรวจอัตโนมัติ
+TypeScript, tests **68/68**, production frontend/Worker build และ `git diff --check` ผ่าน Bundle gzip 113.85 KiB; มีคำเตือนขนาด chunk ภาพ 3D เดิม Tests ใช้ SlipOK fixtures/API mocks ไม่มีการโอนเงินจริงหรือสร้างข้อมูลทดสอบในฐานข้อมูลจริง หลังตั้งคีย์ตรวจการเชื่อมต่อและโควต้าจริงผ่านแล้ว แต่ยังต้องทดลองผู้เล่น LINE จอง ส่งสลิปจริง และให้แอดมินอนุมัติก่อนอ้างว่าเส้นทางการชำระครบทั้งกระบวนการผ่าน
 
 เก็บ Stripe keys, signed webhook, sync และประวัติเก่าเพื่อกระทบยอด แต่ปิดการสร้าง Checkout/QR ใหม่และเอาตัวเลือก Stripe ออกจากหน้าตั้งค่า สิทธิ์หลายบทบาทเดิมยังอยู่
 
