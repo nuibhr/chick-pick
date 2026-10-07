@@ -1,5 +1,7 @@
 # Stripe PromptPay บน Chick&Pick
 
+> Retired for new payments on 7 October 2026. Use [README-SLIPOK.md](README-SLIPOK.md) for the current receipt flow. The instructions below describe the earlier integration; keep existing keys/webhooks only to reconcile old records. New Stripe Checkout and Stripe selection in settings are disabled.
+
 ใช้แทน OCR สำหรับการชำระใหม่บน Cloudflare Worker `chick-pick-tidb-staging` เท่านั้น ยังเก็บประวัติสลิปเดิมและการตรวจสลิปด้วยคนไว้ โค้ด backend Node ใน `server.marketplace.ts` ไม่ได้เปลี่ยนเป็น Stripe ในรอบนี้
 
 ## ตั้งบัญชีและ webhook

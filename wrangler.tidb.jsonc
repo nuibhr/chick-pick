@@ -7,7 +7,8 @@
   "vars": {
     "LINE_CHANNEL_ID": "2011829686",
     "VITE_LIFF_ID": "2011829686-ROHLbNlW",
-    "PUBLIC_APP_URL": "https://chick-pick-tidb-staging.nuibhr1.workers.dev"
+    "PUBLIC_APP_URL": "https://chick-pick-tidb-staging.nuibhr1.workers.dev",
+    "SLIPOK_BRANCH_ID": "77946"
   },
   "kv_namespaces": [
     { "binding": "RECEIPTS", "id": "9341f6d177bb4b23a33a0e5874583d9c" }

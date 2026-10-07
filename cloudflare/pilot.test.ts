@@ -11,6 +11,63 @@ import { cancel } from './pilotDomain';
 import { lessonHoldExpired } from '../src/coachingTypes';
 const stripeAudit = { actorId: 'test', actorType: 'admin' as const, action: 'test.stripe', entityId: 'fixture' };
 
+function slipOKPayload(amount = 190, reference = 'SLIPOKTEST0001') {
+  const now = new Date();
+  return { success: true, data: { success: true, amount, transRef: reference, receivingBank: '004', countryCode: 'TH', paidLocalCurrency: '764', transDate: now.toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' }).replaceAll('-', ''), transTime: now.toLocaleTimeString('en-GB', { timeZone: 'Asia/Bangkok', hourCycle: 'h23' }), receiver: { displayName: 'Test', account: { value: 'xxx-x-x0000-x' } } } };
+}
+
+test('SlipOK concurrent duplicate transfers reserve one reference across receipts; no money until admin approval', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  Object.assign(f.env, { SLIPOK_API_KEY: 'fixture-private-slipok-secret', SLIPOK_BRANCH_ID: '77946' });
+  f.docs.set('transfer-account', { bankName: 'KBANK', accountName: 'Test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  const ids = []; for (const who of ['a','b']) ids.push((await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who))).json()).booking.id);
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url: any, init: any) => { calls++; assert.equal(String(url), 'https://api.slipok.com/api/line/apikey/77946'); assert.equal(init.body.get('amount'), '190.00'); assert.equal(init.body.get('log'), 'true'); return new Response(JSON.stringify(slipOKPayload())); });
+  const upload = (id: string, who: string, byte: number) => pilotRequest(new Request(`https://example.com/api/player/bookings/${id}/receipt`, { method: 'POST', headers: { ...f.player(who), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,byte]) }), f.env, f.verify);
+  const responses = await Promise.all([upload(ids[0], 'a', 1), upload(ids[1], 'b', 2)]); assert.deepEqual(responses.map(r => r?.status), [201,201]); assert.equal(calls, 2);
+  const results = f.data.bookings.map(b => b.receipts![0].verification!.status).sort(); assert.deepEqual(results, ['rejected','verified']);
+  assert.equal(f.data.bookings.filter(b => b.paidAt).length, 0); assert.equal((await (await f.request('/api/finance/report', undefined, owner)).json()).summary.income, 0);
+  const good = f.data.bookings.find(b => b.receipts![0].verification!.status === 'verified')!, bad = f.data.bookings.find(b => b.id !== good.id)!;
+  const reviewPath = (b: any) => `/api/marketplace/bookings/${b.id}/receipts/${b.receipts[0].id}/review`;
+  assert.equal((await f.request(reviewPath(good), { action: 'approve', fundsChecked: true, transferReference: 'FORGED0001', receivedAmount: 190 }, owner)).status, 409);
+  assert.equal((await f.request(reviewPath(good), { action: 'approve', fundsChecked: true, transferReference: 'SLIPOKTEST0001', receivedAmount: 190 }, owner)).status, 200);
+  assert.equal((await f.request(reviewPath(bad), { action: 'approve', fundsChecked: true, transferReference: 'OTHER0001', receivedAmount: 190 }, owner)).status, 409);
+  const report = await (await f.request('/api/finance/report', undefined, owner)).json(); assert.equal(report.summary.income, 19000); assert.equal(f.data.bookings.find(b => b.id === good.id)!.admissionStatus, 'pending');
+  assert.doesNotMatch(JSON.stringify(await (await f.request('/api/player/config')).json()), /fixture-private-slipok-secret/);
+});
+
+test('SlipOK bank delay retains private evidence, blocks approval and throttles retries without another API charge', async t => {
+  const f = fixture(t), owner = await f.signIn(); Object.assign(f.env, { SLIPOK_API_KEY: 'fixture-private-secret', SLIPOK_BRANCH_ID: '77946' });
+  f.docs.set('transfer-account', { bankName: 'KBANK', accountName: 'Test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
+  let calls = 0; t.mock.method(globalThis, 'fetch', async () => { calls++; return new Response(JSON.stringify({ code: 1010, data: { delay: 8 } }), { status: 400 }); });
+  const response = await pilotRequest(new Request(`https://example.com/api/player/bookings/${id}/receipt`, { method: 'POST', headers: { ...f.player('a'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,1]) }), f.env, f.verify);
+  assert.equal(response?.status, 201); const receipt = f.data.bookings[0].receipts![0]; assert.equal(receipt.verification!.status, 'retry'); assert.equal(f.images.size, 1);
+  const path = `/api/marketplace/bookings/${id}/receipts/${receipt.id}`;
+  assert.equal((await f.request(path + '/verify', {}, owner)).status, 429); assert.equal(calls, 1);
+  assert.equal((await f.request(path + '/review', { action: 'approve', fundsChecked: true, transferReference: 'OTHER0001', receivedAmount: 190 }, owner)).status, 409);
+  assert.equal(f.data.bookings[0].paidAt, undefined);
+});
+
+test('SlipOK coaching uses server slot price and private account; owner quota and verification obey team permissions', async t => {
+  const f = fixture(t), owner = await f.signIn(); Object.assign(f.env, { SLIPOK_API_KEY: 'fixture-private-secret', SLIPOK_BRANCH_ID: '77946' });
+  f.docs.set('transfer-account', { bankName: 'KBANK', accountName: 'Test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  const coach = await (await f.request('/api/coaching/coaches', { name: 'Test', specialty: 'Test', bio: '', venue: 'Court', hourlyRate: 550, bookingFee: 100, active: true }, owner)).json();
+  const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start: new Date(Math.ceil((Date.now() + 86400000) / 1800000) * 1800000).toISOString(), hours: 2, status: 'open' }, owner)).json();
+  const lesson = await (await f.request('/api/player/lessons', { slotId: slot.id, amount: 1 }, f.player('a'))).json();
+  let calls = 0; t.mock.method(globalThis, 'fetch', async (url: any, init: any) => { calls++; if (String(url).endsWith('/quota')) return new Response(JSON.stringify({ success: true, data: { quota: 10, overQuota: 0 } })); assert.equal(init.body.get('amount'), '1100.00'); return new Response(JSON.stringify(slipOKPayload(1100, 'COACHSLIP0001'))); });
+  const response = await pilotRequest(new Request(`https://example.com/api/player/lessons/${lesson.id}/receipt`, { method: 'POST', headers: { ...f.player('a'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,1]) }), f.env, f.verify);
+  assert.equal(response?.status, 201); const own = await (await f.request('/api/player/lessons', undefined, f.player('a'))).json();
+  assert.equal(own.lessons[0].receipt.verification.status, 'verified'); assert.equal(own.lessons[0].paidAt, null);
+  const invite = await (await f.request('/api/finance/admin-team', { action: 'invite', role: 'operator' }, owner)).json();
+  const signed = await f.request('/api/finance/auth', { idToken: 'test-line-token-staff', pairingToken: invite.code }); const staff = { Cookie: signed.headers.get('set-cookie')!.split(';')[0] };
+  assert.equal((await f.request('/api/marketplace/setup/slipok')).status, 401); assert.equal((await f.request('/api/marketplace/setup/slipok', undefined, staff)).status, 403);
+  const quota = await (await f.request('/api/marketplace/setup/slipok', undefined, owner)).json(); assert.equal(quota.connected, true); assert.equal(quota.quota, 10); assert.doesNotMatch(JSON.stringify(quota), /fixture-private-secret/);
+  const receiptId = own.lessons[0].receipt.id, path = `/api/coaching/enrollments/${lesson.id}/receipts/${receiptId}`;
+  assert.equal((await f.request(path + '/verify', {}, staff)).status, 409); assert.equal(calls, 2);
+  assert.equal((await f.request(path + '/review', { action: 'approve', fundsChecked: true, transferReference: 'COACHSLIP0001', receivedAmount: 1100 }, staff)).status, 200);
+});
+
 test('one LINE player cannot gain extra seats or payments from concurrent bookings and different slips', async t => {
   const f = fixture(t), admin = await f.signIn();
   f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
@@ -440,31 +497,20 @@ test('one staff member can combine operations and finance without gaining owner 
   assert.equal((await f.request('/api/marketplace', undefined, reduced)).status, 401);
 });
 
-test('Stripe Checkout uses server price and LINE ownership, no secrets or fake paid redirect', async t => {
+test('new Stripe Checkout is retired even with stale settings; transfer booking preserves server pricing and ownership', async t => {
   const f = fixture(t), owner = await f.signIn();
-  f.env.STRIPE_SECRET_KEY = 'sk_test_fixture'; f.env.STRIPE_WEBHOOK_SECRET = 'whsec_fixture'; f.env.PUBLIC_APP_URL = 'https://example.com';
-  assert.equal((await f.request('/api/marketplace/setup/payment', { paymentProvider: 'stripe' }, owner)).status, 200);
-  f.docs.set('court-venues', [{ id: 'court', name: 'สนาม', area: 'ขอนแก่น', address: '', active: true }]);
-  assert.equal((await f.request('/api/marketplace/setup/pilot', { bookingEnabled: true }, owner)).status, 200);
-  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
+  Object.assign(f.env, { STRIPE_SECRET_KEY: 'sk_test_fixture', STRIPE_WEBHOOK_SECRET: 'whsec_fixture', PUBLIC_APP_URL: 'https://example.com' });
+  f.docs.set('transfer-account', { bankName: 'Test', accountName: 'Test', accountNumber: '0000000000' });
+  f.docs.set('worker-pilot', { bookingEnabled: true, paymentProvider: 'stripe' });
+  assert.equal((await f.request('/api/marketplace/setup/payment', { paymentProvider: 'stripe' }, owner)).status, 410);
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game', amount: 1 }, f.player('a'))).json()).booking.id;
+  assert.equal(f.data.bookings[0].amount, 19000); assert.ok(f.data.bookings[0].transferAccount);
   assert.equal((await f.request('/api/player/payments/checkout', { kind: 'game', id }, f.player('b'))).status, 404);
-  let calls = 0;
-  t.mock.method(globalThis, 'fetch', async (url: any, init: any) => {
-    assert.equal(new URL(String(url)).host, 'api.stripe.com');
-    assert.equal(init.method, 'POST'); calls++;
-    const params = new URLSearchParams(init.body);
-    assert.equal(params.get('line_items[0][price_data][unit_amount]'), '19000');
-    assert.equal(params.get('payment_method_types[0]'), 'promptpay');
-    assert.equal(params.get('client_reference_id'), id);
-    assert.equal(params.get('success_url'), 'https://example.com/miniapp?organizer=0&view=tickets&payment=returned');
-    return new Response(JSON.stringify({ id: 'cs_fixture', url: 'https://checkout.stripe.com/c/pay/cs_fixture', amount_total: 19000, currency: 'thb', livemode: false, expires_at: Math.floor(Date.now()/1000)+1860, metadata: { attemptId: params.get('metadata[attemptId]') } }), { headers: { 'Content-Type': 'application/json' } });
-  });
-  assert.equal((await f.request('/api/player/payments/checkout', { kind: 'game', id, amount: 1, playerId: 'forged' }, f.player('a'))).status, 200);
-  assert.equal(calls, 1); assert.equal(f.data.bookings[0].paidAt, undefined);
-  assert.equal((await f.request('/api/player/bookings/' + id + '/cancel', {}, f.player('a'))).status, 409);
-  const publicConfig = await (await f.request('/api/player/config')).text(); assert.doesNotMatch(publicConfig, /sk_test|whsec/);
+  assert.equal((await f.request('/api/player/payments/checkout', { kind: 'game', id }, f.player('a'))).status, 410);
+  const config = await (await f.request('/api/player/config')).json(); assert.equal(config.paymentProvider, 'manual'); assert.equal(config.stripeRetired, true);
+  assert.equal(f.data.bookings[0].stripe, undefined);
+  assert.equal((await f.request('/api/player/bookings/' + id + '/cancel', {}, f.player('a'))).status, 200);
   assert.equal((await f.request('/api/stripe/webhook', {}, {}, 'POST')).status, 400);
-  assert.equal(calls, 1);
 });
 
 test('verified Stripe results are idempotent, charge fees before shares, require admission, and isolate test payments', async t => {
@@ -532,6 +578,7 @@ test('coach Stripe booking derives amount from its slot and holds it until Strip
   const f = fixture(t), owner = await f.signIn();
   Object.assign(f.env, { STRIPE_SECRET_KEY: 'sk_test_fixture', STRIPE_WEBHOOK_SECRET: 'whsec_fixture', PUBLIC_APP_URL: 'https://example.com' });
   f.docs.set('worker-pilot', { bookingEnabled: true, paymentProvider: 'stripe' });
+  f.docs.set('transfer-account', { bankName: 'Test', accountName: 'Test', accountNumber: '0000000000' });
   const coach = await (await f.request('/api/coaching/coaches', { name: 'Test', specialty: 'Test', bio: '', venue: 'Court', hourlyRate: 550, bookingFee: 100, active: true }, owner)).json();
   const start = new Date(Math.ceil((Date.now() + 86400000) / 1800000) * 1800000).toISOString();
   const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start, hours: 2, status: 'open' }, owner)).json();

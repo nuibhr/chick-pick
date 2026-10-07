@@ -2,12 +2,13 @@ import type { Booking, MemberProfile, Session } from '../src/marketplaceTypes';
 import { stripePublicView } from '../src/paymentTypes';
 import { stripeReadiness } from './stripePayments';
 import type { StripeEnv } from './stripePayments';
+import { slipokConfigured, type SlipOkEnv } from './slipok';
 import { lessonView } from './coachingDomain';
 import { TidbDocuments } from './tidbDocuments';
 import { ownProfile, profileSettings, updateProfile } from '../server/playerProfiles';
 import { pilotRequest, type ReceiptKV } from './pilot';
 
-type Env = StripeEnv & {
+type Env = StripeEnv & SlipOkEnv & {
   ASSETS: { fetch(request: Request): Promise<Response> };
   TIDB_DATABASE_URL?: string;
   RECEIPTS?: ReceiptKV;
@@ -152,7 +153,7 @@ export default {
           status: 'ok', mode: 'tidb-pilot-prepared', database: 'tidb',
           lineConfigured: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID),
           adminConfigured: Boolean(env.ADMIN_SESSION_SECRET && env.ADMIN_PAIRING_TOKEN),
-          ocrConfigured: false, stripeConfigured: stripeReadiness(env).configured, stripeMode: stripeReadiness(env).mode, receiptStorageConfigured: Boolean(env.RECEIPTS),
+          ocrConfigured: false, slipokConfigured: slipokConfigured(env), stripeRetired: true, stripeConfigured: stripeReadiness(env).configured, stripeMode: stripeReadiness(env).mode, receiptStorageConfigured: Boolean(env.RECEIPTS),
         });
         if (pathname === '/api/player/me' && identity) {
           return json({ name: identity.name, profile: ownProfile(data, identity) });
@@ -165,7 +166,7 @@ export default {
               transferAccount: booking.transferAccount || null, createdAt: booking.createdAt,
               paidAt: booking.paidAt || null, admissionStatus: booking.admissionStatus || 'pending',
               cancelledAt: booking.cancelledAt || null,
-              stripe: stripePublicView(booking.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, rejectReason: receipt.rejectReason || null } : null,
+              stripe: stripePublicView(booking.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null,
             };
           });
           const coaching = (await new TidbDocuments(env.TIDB_DATABASE_URL).readDocument<import('../src/coachingTypes').Enrollment[]>('coaching', [])).filter(e => e.playerId === `line:${identity.sub}`).map(lessonView);

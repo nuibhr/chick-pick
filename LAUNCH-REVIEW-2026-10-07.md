@@ -1,4 +1,22 @@
-# Chick&Pick: สิทธิ์หลายบทบาทและ Stripe PromptPay — 7 ตุลาคม 2026
+# Chick&Pick: สิทธิ์หลายบทบาทและ SlipOK — 7 ตุลาคม 2026
+
+## ผลล่าสุด: เปลี่ยนการจองใหม่เป็นโอนเงินและ SlipOK
+
+Deploy Worker `chick-pick-tidb-staging` เวอร์ชัน `8673ad20-60df-4941-96be-3b18ed2aae90` สำเร็จ การจองใหม่ทั้ง Open Play และโค้ชใช้การโอนเงินและแนบสลิป ไม่มีช่องกรอก Secret ในแอป อ่านคีย์จาก `env.SLIPOK_API_KEY` เท่านั้น สาขา `77946` เก็บไว้ใน Worker configuration ไม่เปลี่ยน TiDB/LINE หรือข้อมูลการจองเดิม
+
+ตรวจ `/api/health` และ `/api/player/config` หลัง deploy ได้ HTTP 200: TiDB/LINE/admin/receipt storage พร้อม, `bookingEnabled:true`, `paymentProvider:manual`, `stripeRetired:true` และ **`slipokConfigured:false`** ยังไม่มี `SLIPOK_API_KEY` บน Worker จึงยังไม่เรียกว่าตรวจสลิปจริงกับ SlipOK สำเร็จ ขณะนี้แอดมินตรวจสลิปเองได้ตามเดิม `/api/marketplace/setup/slipok` เมื่อไม่มี session ได้ 401
+
+ตัวเชื่อมตรวจยอด บัญชีและธนาคารผู้รับ เวลาโอน และกันเลขธุรกรรมซ้ำข้าม Open Play/โค้ชใน transaction ผลตรวจผ่านยังต้องให้แอดมินอนุมัติก่อนลงเงินและค่าคอม ผู้จัดเลือกคนเข้าสนามเอง ผลไม่ผ่านหรือยังตรวจไม่เสร็จไม่สามารถฝืนอนุมัติผ่าน API ได้ รายละเอียดการตั้งค่าและข้อจำกัดอยู่ใน [README-SLIPOK.md](README-SLIPOK.md)
+
+TypeScript, tests **68/68**, production frontend/Worker build และ `git diff --check` ผ่าน Bundle gzip 113.85 KiB; มีคำเตือนขนาด chunk ภาพ 3D เดิม Tests ใช้ SlipOK fixtures/API mocks ไม่มีการโอนเงินจริงหรือสร้างข้อมูลทดสอบในฐานข้อมูลจริง ยังต้องใส่คีย์ ตรวจโควต้า และทดลองผู้เล่น LINE ส่งสลิปจริงก่อนเปิดใช้การตรวจอัตโนมัติ
+
+เก็บ Stripe keys, signed webhook, sync และประวัติเก่าเพื่อกระทบยอด แต่ปิดการสร้าง Checkout/QR ใหม่และเอาตัวเลือก Stripe ออกจากหน้าตั้งค่า สิทธิ์หลายบทบาทเดิมยังอยู่
+
+การตรวจ UI รอบล่าสุดยังติดที่ browser automation เชื่อม debugger ของแท็บ Chrome ไม่ได้ จึงไม่มีหลักฐานการกดเมนูใหม่หรือการส่งสลิปจากมือถือจริง ไม่ได้อ้างว่าทดสอบ interaction ผ่านแล้ว
+
+## หลักฐานก่อนเปลี่ยนไปใช้ SlipOK
+
+เนื้อหาด้านล่างบันทึกการทำ Stripe ก่อนเปลี่ยนช่องทางตามคำขอ ไม่ใช่สถานะปัจจุบัน และขั้นตอนเปิด Stripe ด้านล่างไม่ใช้กับการเปิดรับจองใหม่แล้ว
 
 ## ผลที่ตรวจได้จริง
 

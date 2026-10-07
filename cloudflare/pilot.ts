@@ -10,10 +10,12 @@ import { recordVerifiedTransfer } from './receiptVerification';
 import { bookingReadiness } from './bookingReadiness';
 import { memberRoles, permissions } from '../src/adminRoles';
 import type { Venue } from '../src/venueTypes';
-import { checkoutPayment, syncPayment, stripeReadiness, stripeWebhook, type StripeEnv } from './stripePayments';
+import { paymentRow, syncPayment, stripeReadiness, stripeWebhook, type StripeEnv } from './stripePayments';
+import { slipokConfigured, type SlipOkEnv } from './slipok';
+import { checkStoredReceipt } from './slipokReceipts';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
-export type PilotEnv = StripeEnv & { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
+export type PilotEnv = StripeEnv & SlipOkEnv & { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
 type Verify = (token: string, channel: string) => Promise<Actor>;
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers } });
 async function bytes(request: Request, maximum: number) {
@@ -62,17 +64,22 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       if (request.method !== 'POST') fail(405, 'ใช้ POST');
       const actor = await identity(request, env, verify), v = await body(request);
       if (!['game', 'coaching'].includes(String(v.kind)) || typeof v.id !== 'string' || v.id.length > 120) fail(400, 'เลือกการจองที่ถูกต้อง');
-      return json(await (path.endsWith('/checkout') ? checkoutPayment : syncPayment)(db, env, actor, v.kind as 'game' | 'coaching', v.id as string));
+      if (path.endsWith('/checkout')) {
+        const row = paymentRow(await db.readFinance(), v.kind as 'game' | 'coaching', v.id as string);
+        if (row.playerId !== 'line:' + actor.sub) fail(404, 'ไม่พบการจองของคุณ');
+        fail(410, 'ปิดการชำระใหม่ผ่าน Stripe แล้ว กรุณาโอนและแนบสลิปตามรายการจอง');
+      }
+      return json(await syncPayment(db, env, actor, v.kind as 'game' | 'coaching', v.id as string));
     }
     if (coachPublic) {
       if (request.method !== 'GET') fail(405, 'ใช้ GET');
       if (path === '/api/venues') return json({ venues: (await db.readDocument<Venue[]>('court-venues', [])).filter(v => v.active) });
       const [docs, settings, account, owner] = await Promise.all([db.readFinance(), db.readDocument<{ bookingEnabled?: boolean; paymentProvider?: 'manual' | 'stripe' }>('worker-pilot', {}), db.readTransferAccount(), db.readDocument<Partial<Organizer>>(organizerKey, {})]);
-      return json(coachCatalog(docs, Boolean(settings.bookingEnabled && owner.sub && env.ADMIN_SESSION_SECRET && (settings.paymentProvider === 'stripe' ? stripe.configured : account && env.RECEIPTS))));
+      return json(coachCatalog(docs, Boolean(settings.bookingEnabled && owner.sub && env.ADMIN_SESSION_SECRET && account && env.RECEIPTS)));
     }
     if (path === '/api/player/config') {
       const [settings, account, owner] = await Promise.all([db.readDocument<{ bookingEnabled?: boolean; paymentProvider?: 'manual' | 'stripe' }>('worker-pilot', {}), db.readTransferAccount(), db.readDocument<Partial<Organizer>>(organizerKey, {})]);
-      return json({ liffId: env.VITE_LIFF_ID || null, connected: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), profileEditingEnabled: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), bookingEnabled: Boolean(settings.bookingEnabled && owner.sub && env.ADMIN_SESSION_SECRET && (settings.paymentProvider === 'stripe' ? stripe.configured : account && env.RECEIPTS)), pilot: true, paymentProvider: settings.paymentProvider || 'manual', stripeConfigured: stripe.configured, stripeMode: stripe.mode });
+      return json({ liffId: env.VITE_LIFF_ID || null, connected: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), profileEditingEnabled: Boolean(env.LINE_CHANNEL_ID && env.VITE_LIFF_ID), bookingEnabled: Boolean(settings.bookingEnabled && owner.sub && env.ADMIN_SESSION_SECRET && account && env.RECEIPTS), pilot: true, paymentProvider: 'manual', slipVerification: slipokConfigured(env) ? 'slipok' : 'manual', slipokConfigured: slipokConfigured(env), stripeRetired: true, stripeConfigured: stripe.configured, stripeMode: stripe.mode });
     }
     if (path === '/api/finance/auth') {
       const owner = await db.readDocument<Partial<Organizer>>(organizerKey, {});
@@ -105,9 +112,9 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       if (path === '/api/player/lessons') {
         if (request.method === 'GET') return json({ lessons: (await db.readFinance()).coaching.filter(e => e.playerId === 'line:' + actor.sub).map(e => lessonView(e)) });
         const v = await body(request), [settings, account, owner] = await Promise.all([db.readDocument<{ bookingEnabled?: boolean; paymentProvider?: 'manual' | 'stripe' }>('worker-pilot', {}), db.readTransferAccount(), db.readDocument<Partial<Organizer>>(organizerKey, {})]);
-        if (!owner.sub || !env.ADMIN_SESSION_SECRET || !env.RECEIPTS && !stripe.configured) fail(503, 'ผู้จัดยังไม่พร้อมรับจอง');
-        const result = await db.updateFinance((docs, context) => bookLesson(docs, actor, v.slotId, context.enabled && (context.paymentProvider !== 'stripe' || stripe.configured), context.paymentProvider === 'stripe' ? undefined : context.account || undefined, context.paymentProvider === 'stripe' && stripe.configured), audit(actor, 'coaching.booked', String(v.slotId)));
-        return json({ ...result, message: settings.paymentProvider === 'stripe' ? 'จองเวลาแล้ว เปิด PromptPay QR ในรายการจองของคุณ' : 'จองเวลาแล้ว แนบสลิปและรอผู้จัดตรวจเงิน' }, result.repeated ? 200 : 201);
+        if (!owner.sub || !env.ADMIN_SESSION_SECRET || !env.RECEIPTS) fail(503, 'ผู้จัดยังไม่พร้อมรับจอง');
+        const result = await db.updateFinance((docs, context) => bookLesson(docs, actor, v.slotId, context.enabled, context.account || undefined, false), audit(actor, 'coaching.booked', String(v.slotId)));
+        return json({ ...result, message: 'จองเวลาแล้ว แนบสลิปและรอผู้จัดตรวจเงิน' }, result.repeated ? 200 : 201);
       }
       if (request.method !== 'POST') fail(405, 'ใช้ POST');
       const match = path.match(/^\/api\/player\/lessons\/([^/]+)\/(receipt|cancel)$/)!, id = decodeURIComponent(match[1]);
@@ -118,11 +125,12 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       if (!validImage(image, type)) fail(415, 'รับภาพ JPG PNG WebP ไม่เกิน 5 MB');
       await limitAuth(db, actor.sub, true);
       const receiptId = crypto.randomUUID(), hash = await digest(image);
-      const receipt: ReceiptSubmission = { id: receiptId, fileName: receiptId, mimeType: type as ReceiptSubmission['mimeType'], size: image.length, sha256: hash, submittedAt: new Date().toISOString(), status: 'pending', ocr: unavailableOcr() };
+      const receipt: ReceiptSubmission = { id: receiptId, fileName: receiptId, mimeType: type as ReceiptSubmission['mimeType'], size: image.length, sha256: hash, submittedAt: new Date().toISOString(), status: 'pending', ocr: unavailableOcr(), ...(slipokConfigured(env) ? { verification: { provider: 'slipok' as const, status: 'unavailable' as const, checkedAt: new Date().toISOString(), message: 'รอเริ่มตรวจ SlipOK' } } : {}) };
       await env.RECEIPTS.put('receipt:' + receiptId, new Uint8Array(image).buffer);
       try { await db.updateFinance(docs => submitLessonReceipt(docs, actor, id, receipt), audit(actor, 'coaching.receipt.submitted', receiptId)); }
       catch (e) { if (e instanceof PilotError) await env.RECEIPTS.delete('receipt:' + receiptId); throw e; }
-      return json({ receipt: { id: receiptId, status: 'pending' } }, 201);
+      const verification = slipokConfigured(env) ? await checkStoredReceipt(db, env, 'coaching', id, receiptId, audit(actor, 'slipok.checked', receiptId)) : undefined;
+      return json({ receipt: { id: receiptId, status: 'pending', verification } }, 201);
     }
     if (playerMutation) {
       if (request.method !== 'POST') fail(405, 'ใช้ POST');
@@ -131,9 +139,9 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
         const v = await body(request); if (typeof v.sessionId !== 'string' || v.sessionId.length > 120) fail(400, 'รหัสก๊วนไม่ถูกต้อง');
         const owner = await db.readDocument<Partial<Organizer>>(organizerKey, {});
         const settings = await db.readDocument<{ paymentProvider?: 'manual' | 'stripe' }>('worker-pilot', {});
-        if (!owner.sub || !env.ADMIN_SESSION_SECRET || !env.RECEIPTS && !stripe.configured) fail(503, 'ผู้จัดยังไม่พร้อมรับจอง');
-        const result = await db.updateMarketplace((data, ctx) => book(data, { ...ctx, stripeReady: stripe.configured }, actor, v.sessionId as string), audit(actor, 'booking.requested', String(v.sessionId)), true);
-        return json({ booking: { id: result.id }, repeated: result.repeated, message: settings.paymentProvider === 'stripe' ? 'จองแล้ว เปิด PromptPay QR ในรายการจอง แล้วรอผู้จัดเลือกเข้าสนาม' : 'จองแล้ว กรุณาส่งสลิปและรอผู้จัดเลือกเข้าสนาม' }, result.repeated ? 200 : 201);
+        if (!owner.sub || !env.ADMIN_SESSION_SECRET || !env.RECEIPTS) fail(503, 'ผู้จัดยังไม่พร้อมรับจอง');
+        const result = await db.updateMarketplace((data, ctx) => book(data, { ...ctx, paymentProvider: 'manual' }, actor, v.sessionId as string), audit(actor, 'booking.requested', String(v.sessionId)), true);
+        return json({ booking: { id: result.id }, repeated: result.repeated, message: 'จองแล้ว กรุณาส่งสลิปและรอผู้จัดเลือกเข้าสนาม' }, result.repeated ? 200 : 201);
       }
       const match = path.match(/^\/api\/player\/bookings\/([^/]+)\/(receipt|cancel)$/)!; const id = decodeURIComponent(match[1]);
       if (match[2] === 'cancel') return json(await db.updateMarketplace(data => cancel(data, actor, id), audit(actor, 'booking.cancelled', id), true));
@@ -144,7 +152,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       if (!validImage(image, type)) fail(415, 'รับเฉพาะภาพ JPG, PNG หรือ WebP ขนาดไม่เกิน 5 MB');
       await limitAuth(db, actor.sub, true);
       const receiptId = crypto.randomUUID(), hash = await digest(image);
-      const receipt: ReceiptSubmission = { id: receiptId, fileName: `${receiptId}.${type === 'image/jpeg' ? 'jpg' : type === 'image/png' ? 'png' : 'webp'}`, mimeType: type as ReceiptSubmission['mimeType'], size: image.length, sha256: hash, submittedAt: new Date().toISOString(), status: 'pending', ocr: unavailableOcr() };
+      const receipt: ReceiptSubmission = { id: receiptId, fileName: `${receiptId}.${type === 'image/jpeg' ? 'jpg' : type === 'image/png' ? 'png' : 'webp'}`, mimeType: type as ReceiptSubmission['mimeType'], size: image.length, sha256: hash, submittedAt: new Date().toISOString(), status: 'pending', ocr: unavailableOcr(), ...(slipokConfigured(env) ? { verification: { provider: 'slipok' as const, status: 'unavailable' as const, checkedAt: new Date().toISOString(), message: 'รอเริ่มตรวจ SlipOK' } } : {}) };
       await env.RECEIPTS.put(`receipt:${receiptId}`, new Uint8Array(image).buffer);
       try { await db.updateFinance(docs => { const b = receiptEligibility(docs.marketplace, actor, id); if (docs['revenue-settlements'].some(s => s.key === `game:${b.sessionId}`)) fail(409, 'ก๊วนปิดยอดแล้ว'); if (docs.coaching.some(e => e.receipts?.some(r => r.sha256 === receipt.sha256 && r.status !== 'rejected'))) fail(409, 'ภาพสลิปนี้ใช้กับการเรียนแล้ว'); submitReceipt(docs.marketplace, actor, id, receipt); }, audit(actor, 'receipt.submitted', receiptId)); }
       catch (e) {
@@ -153,10 +161,27 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
         if (e instanceof PilotError) await env.RECEIPTS.delete(`receipt:${receiptId}`);
         throw e;
       }
-      return json({ receipt: { id: receiptId, status: 'pending', ocr: receipt.ocr }, message: 'ส่งสลิปแล้ว รอแอดมินตรวจยอดเข้าบัญชี' }, 201);
+      const verification = slipokConfigured(env) ? await checkStoredReceipt(db, env, 'game', id, receiptId, audit(actor, 'slipok.checked', receiptId)) : undefined;
+      return json({ receipt: { id: receiptId, status: 'pending', ocr: receipt.ocr, verification }, message: 'ส่งสลิปแล้ว รอแอดมินอนุมัติเงินและเลือกเข้าสนาม' }, 201);
     }
     const owner = await authenticateAdmin(request, env.ADMIN_SESSION_SECRET, db);
     authorize(owner.roles, path, request.method);
+    const verifyReceipt = path.match(/^\/api\/(marketplace\/bookings|coaching\/enrollments)\/([^/]+)\/receipts\/([^/]+)\/verify$/);
+    if (verifyReceipt) {
+      if (request.method !== 'POST') fail(405, 'ใช้ POST');
+      await limitAuth(db, 'slipok:' + owner.sub, true);
+      return json(await checkStoredReceipt(db, env, verifyReceipt[1] === 'marketplace/bookings' ? 'game' : 'coaching', decodeURIComponent(verifyReceipt[2]), decodeURIComponent(verifyReceipt[3]), audit(owner, 'slipok.checked', verifyReceipt[3], true)));
+    }
+    if (path === '/api/marketplace/setup/slipok') {
+      if (request.method !== 'GET') fail(405, 'ใช้ GET');
+      if (!slipokConfigured(env)) return json({ configured: false, connected: false, quota: null, message: 'ตั้ง SLIPOK_API_KEY ใน Cloudflare Secret ก่อน' });
+      try {
+        const r = await fetch('https://api.slipok.com/api/line/apikey/' + env.SLIPOK_BRANCH_ID + '/quota', { headers: { 'x-authorization': env.SLIPOK_API_KEY! }, redirect: 'error', signal: AbortSignal.timeout(8000) });
+        const v = await r.json() as { success?: boolean; data?: { quota?: unknown; overQuota?: unknown } };
+        if (!r.ok || v.success !== true || typeof v.data?.quota !== 'number' || !Number.isFinite(v.data.quota)) throw Error('invalid quota');
+        return json({ configured: true, connected: true, quota: v.data.quota, overQuota: typeof v.data.overQuota === 'number' && Number.isFinite(v.data.overQuota) ? v.data.overQuota : null, message: 'เชื่อม SlipOK ได้แล้ว ยังต้องทดลองตรวจสลิปของการจองจริง' });
+      } catch { return json({ configured: true, connected: false, quota: null, message: 'SlipOK ไม่ยืนยันคีย์หรือโควต้า กรุณาตรวจ Secret สาขา และแพ็กเกจ' }); }
+    }
     if (path === '/api/marketplace/venues' && request.method === 'GET') return json({ venues: await db.readDocument<Venue[]>('court-venues', []) });
     if (/^\/api\/marketplace\/venues(?:\/[^/]+)?$/.test(path) && request.method === 'POST') {
       const v = await body(request), id = path.split('/')[4];
@@ -215,12 +240,12 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     if (path === '/api/marketplace/setup') {
       if (request.method !== 'GET') fail(405, 'ใช้ GET');
       const [account, venues, docs, pilot] = await Promise.all([db.readTransferAccount(), db.readDocument<Venue[]>('court-venues', []), db.readFinance(), db.readDocument<{ bookingEnabled: boolean; paymentProvider?: 'manual' | 'stripe' }>('worker-pilot', { bookingEnabled: false })]);
-      return json({ transferAccount: permissions(owner.roles).receipts ? account : null, pilot, ownerName: owner.name, role: owner.role, roles: owner.roles, ocrConfigured: false, stripeConfigured: stripe.configured, stripeMode: stripe.mode, readiness: bookingReadiness(docs, venues, account, Boolean(env.RECEIPTS), stripe.configured, pilot.paymentProvider || 'manual') });
+      return json({ transferAccount: permissions(owner.roles).receipts ? account : null, pilot: { ...pilot, paymentProvider: 'manual' }, ownerName: owner.name, role: owner.role, roles: owner.roles, ocrConfigured: false, slipokConfigured: slipokConfigured(env), slipokBranchId: env.SLIPOK_BRANCH_ID || null, stripeRetired: true, stripeConfigured: stripe.configured, stripeMode: stripe.mode, readiness: bookingReadiness(docs, venues, account, Boolean(env.RECEIPTS)) });
     }
     if (path === '/api/marketplace/setup/payment' && request.method === 'POST') {
       const v = await body(request);
-      if (v.paymentProvider !== 'manual' && v.paymentProvider !== 'stripe') fail(400, 'เลือกช่องทางชำระเงิน');
-      if (v.paymentProvider === 'stripe' && !stripe.configured) fail(409, 'ตั้ง Stripe secret key, webhook secret และ PUBLIC_APP_URL ก่อน');
+      if (v.paymentProvider === 'stripe') fail(410, 'ยกเลิกการเปิด Stripe ใหม่แล้ว ใช้โอนและตรวจสลิปผ่าน SlipOK');
+      if (v.paymentProvider !== 'manual') fail(400, 'เลือกโอนและแนบสลิป');
       await db.updateDocument<{ bookingEnabled: boolean; paymentProvider?: 'manual' | 'stripe' }, void>('worker-pilot', { bookingEnabled: false }, saved => { saved.paymentProvider = v.paymentProvider as 'manual' | 'stripe'; saved.bookingEnabled = false; }, audit(owner, 'payment.provider.updated', 'worker-pilot', true));
       return json({ paymentProvider: v.paymentProvider, bookingEnabled: false });
     }
@@ -230,10 +255,10 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     }
     if (path === '/api/marketplace/setup/pilot' && request.method === 'POST') {
       const v = await body(request), settings = await db.readDocument<{ paymentProvider?: 'manual' | 'stripe' }>('worker-pilot', {}); if (typeof v.bookingEnabled !== 'boolean') fail(400, 'เลือกเปิดหรือปิดรับจอง');
-      if (v.bookingEnabled && (settings.paymentProvider === 'stripe' ? !stripe.configured : !env.RECEIPTS || !(await db.readTransferAccount()))) fail(409, 'ตั้งบัญชีรับโอนและที่เก็บสลิปก่อน');
+      if (v.bookingEnabled && (!env.RECEIPTS || !(await db.readTransferAccount()))) fail(409, 'ตั้งบัญชีรับโอนและที่เก็บสลิปก่อน');
       if (v.bookingEnabled) {
         const [account, venues, docs] = await Promise.all([db.readTransferAccount(), db.readDocument<Venue[]>('court-venues', []), db.readFinance()]);
-        if (!bookingReadiness(docs, venues, account, Boolean(env.RECEIPTS), stripe.configured, settings.paymentProvider || 'manual').readyToOpen) fail(409, 'เพิ่มสนามที่เปิดแสดง และสร้างก๊วนหรือช่วงเวลาโค้ชในอนาคตที่สนามนั้นก่อนเปิดรับ');
+        if (!bookingReadiness(docs, venues, account, Boolean(env.RECEIPTS)).readyToOpen) fail(409, 'เพิ่มสนามที่เปิดแสดง และสร้างก๊วนหรือช่วงเวลาโค้ชในอนาคตที่สนามนั้นก่อนเปิดรับ');
       }
       await db.updateDocument('worker-pilot', { bookingEnabled: false }, saved => { saved.bookingEnabled = v.bookingEnabled as boolean; }, audit(owner, 'pilot.updated', 'worker-pilot', true)); return json({ bookingEnabled: v.bookingEnabled });
     }
