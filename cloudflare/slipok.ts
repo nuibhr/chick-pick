@@ -6,6 +6,7 @@ export type SlipVerification = {
   provider: 'slipok'; status: 'checking' | 'verified' | 'rejected' | 'retry' | 'unavailable';
   checkedAt: string; message: string; code?: number; reference?: string; amountSatang?: number;
   transferredAt?: string; receiver?: string; attemptId?: string; retryAt?: string; paymentChannel?: 'bank' | 'promptpay'; paymentChannelLabel?: string;
+  currencyRecovery?: true;
 };
 export const slipokConfigured = (env: SlipOkEnv) => Boolean(env.SLIPOK_API_KEY && !/[\s\x00-\x1f]/.test(env.SLIPOK_API_KEY) && /^\d{1,10}$/.test(env.SLIPOK_BRANCH_ID || ''));
 export type SlipOkConnection = { configured: boolean; connected: boolean; quota: number | null; overQuota?: number | null; message: string; checkedAt: string; diagnostic?: string; upstreamStatus?: number | null };
@@ -65,13 +66,17 @@ export function matchesSlipMobile(masked: unknown, number: string) {
   else if (/^66[0-9x*]{9}$/.test(value)) value = '0' + value.slice(2);
   return matchesSlipAccount(value, number);
 }
-function receiverChannel(receiver: Record<string, unknown>, receivingBank: string, account: TransferAccount) {
+function receiverChannel(receiver: Record<string, unknown>, receivingBank: string, sendingBank: string, account: TransferAccount) {
   const bankMatches = (name: string) => banks[receivingBank]?.some(alias => bankName(alias) === bankName(name));
   const bankAccount = object(receiver.account), proxy = object(receiver.proxy);
   return transferOptions(account).find(channel => {
-    if (channel.kind === 'promptpay') return Boolean(banks[receivingBank]) && (
-      proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, channel.accountNumber)
-      || channel.linkedBank && bankMatches(channel.linkedBank.bankName) && bankAccount.type === 'BANKAC' && matchesSlipAccount(bankAccount.value, channel.linkedBank.accountNumber));
+    if (channel.kind === 'promptpay') {
+      // SCB can return only the receiving mobile, with an empty bank/account.
+      if (!receivingBank) return Boolean(banks[sendingBank]) && proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, channel.accountNumber);
+      if (!banks[receivingBank] || channel.linkedBank && !bankMatches(channel.linkedBank.bankName)) return false;
+      return proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, channel.accountNumber)
+        || Boolean(channel.linkedBank && bankAccount.type === 'BANKAC' && matchesSlipAccount(bankAccount.value, channel.linkedBank.accountNumber));
+    }
     if (!bankMatches(channel.bankName)) return false;
     if (matchesSlipAccount(bankAccount.value, channel.accountNumber)) return true;
     // A mobile may have been relinked: a contradictory receiving account must not pass.
@@ -100,9 +105,12 @@ export function slipokResult(payload: unknown, httpOk: boolean, expectedSatang: 
   const amount = d.amount, reference = short(d.transRef).replace(/[\s-]/g, '').toUpperCase();
   if (typeof amount !== 'number' || !Number.isFinite(amount) || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-7 || Math.round(amount * 100) !== expectedSatang) return reject('ยอดที่ SlipOK ยืนยันไม่ตรงกับยอดจอง', 1013);
   if (!/^[A-Z0-9]{6,80}$/.test(reference)) return reject('SlipOK ไม่ส่งเลขรายการโอนที่ใช้งานได้');
-  if (d.countryCode !== 'TH' || d.paidLocalCurrency !== undefined && !['764', 'THB'].includes(String(d.paidLocalCurrency))) return reject('สลิปนี้ไม่ใช่รายการเงินบาทในประเทศไทย');
+  if (d.countryCode !== 'TH') return reject('รหัสประเทศของรายการโอนไม่ใช่ TH หรือธนาคารยังไม่ส่งข้อมูลประเทศ');
+  // Optional currency may be null/empty for domestic SCB PromptPay results.
+  const currency = d.paidLocalCurrency;
+  if (currency != null && (typeof currency !== 'string' && currency !== 764 || typeof currency === 'string' && currency.trim() !== '' && !['764', 'THB'].includes(currency.trim().toUpperCase()))) return reject('สกุลเงินที่ธนาคารระบุไม่ใช่เงินบาท');
   const receiver = object(d.receiver);
-  const matched = receiverChannel(receiver, short(d.receivingBank), account);
+  const matched = receiverChannel(receiver, short(d.receivingBank), short(d.sendingBank), account);
   if (!matched) return reject('ข้อมูลผู้รับบนสลิปไม่ตรงกับช่องทางรับเงินของการจองนี้ หรือข้อมูลที่ธนาคารเปิดเผยยังยืนยันไม่ได้', 1014);
   const date = short(d.transDate), time = short(d.transTime);
   const transferredAt = /^\d{8}$/.test(date) && /^\d{2}:\d{2}:\d{2}$/.test(time) ? `${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}T${time}+07:00` : '';
@@ -111,13 +119,16 @@ export function slipokResult(payload: unknown, httpOk: boolean, expectedSatang: 
   return { provider: 'slipok', status: 'verified', checkedAt, message: 'SlipOK ยืนยันรายการ ยอด และบัญชีผู้รับตรงแล้ว รอแอดมินอนุมัติ', reference, amountSatang: expectedSatang, transferredAt: new Date(timestamp).toISOString(), receiver: short(receiver.displayName) || short(receiver.name), paymentChannel: matched.kind || 'bank', paymentChannelLabel: channelLabel(matched) };
 }
 
-export async function verifySlipOk(env: SlipOkEnv, image: ArrayBuffer, mimeType: ReceiptSubmission['mimeType'], amount: number, account: TransferAccount, bookedAt: string, transport: typeof fetch = fetch): Promise<SlipVerification> {
+export async function verifySlipOk(env: SlipOkEnv, image: ArrayBuffer, mimeType: ReceiptSubmission['mimeType'], amount: number, account: TransferAccount, bookedAt: string, transport: typeof fetch = fetch, currencyRecovery = false): Promise<SlipVerification> {
   const checkedAt = new Date().toISOString();
   if (!slipokConfigured(env)) return { provider: 'slipok', status: 'unavailable', checkedAt, message: 'ยังไม่ตั้งคีย์ SlipOK ฝั่งเซิร์ฟเวอร์' };
   try {
     const form = new FormData();
     form.append('files', new Blob([image], { type: mimeType }), 'slip.' + (mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg'));
-    form.append('log', 'true'); form.append('amount', (amount / 100).toFixed(2));
+    // A narrowly scoped admin repair re-verifies the same hashed image without
+    // logging it twice. The receipt transaction still reserves references locally.
+    if (!currencyRecovery) form.append('log', 'true');
+    form.append('amount', (amount / 100).toFixed(2));
     const r = await slipokRequest(env, '', { method: 'POST', body: form }, 18000, transport);
     return slipokResult(await slipokJson(r), r.ok, amount, account, bookedAt);
   } catch (cause) { return { provider: 'slipok', status: 'retry', checkedAt, retryAt: new Date(Date.now() + 60000).toISOString(), message: connectionFailure(cause).message }; }

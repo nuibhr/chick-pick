@@ -9,6 +9,17 @@ const now = Date.parse('2026-10-07T06:00:00Z'), bookedAt = '2026-10-07T05:50:00Z
 const account = { bankName: 'ธนาคารกสิกรไทย', accountName: 'Test', accountNumber: '1234531090' };
 const valid = () => ({ success: true, data: { success: true, transRef: 'TRANSFER0001', amount: 190, countryCode: 'TH', paidLocalCurrency: '764', receivingBank: '004', transDate: '20261007', transTime: '12:55:00', receiver: { displayName: 'Test', account: { value: 'xxx-x-x3109-x' } } } });
 
+test('SCB PromptPay with TH, null optional currency and only the matching receiver mobile is verified', () => {
+  const target = { kind: 'promptpay' as const, bankName: 'พร้อมเพย์', accountName: 'Fixture', accountNumber: '0812345678', linkedBank: { bankName: 'SCB', accountNumber: '1234531090' } };
+  const scb = { ...valid(), data: { ...valid().data, sendingBank: '014', receivingBank: '', paidLocalCurrency: null, paidLocalAmount: null, receiver: { displayName: 'Fixture', proxy: { type: 'MSISDN', value: '081xxx5678' }, account: { type: '', value: '' } } } };
+  const result = slipokResult(scb, true, 19000, target, bookedAt, now);
+  assert.equal(result.status, 'verified', result.message);
+  assert.equal(result.paymentChannel, 'promptpay');
+  for (const currency of [undefined, '', '  ', 764, ' THB ']) assert.equal(slipokResult({ ...scb, data: { ...scb.data, paidLocalCurrency: currency } }, true, 19000, target, bookedAt, now).status, 'verified');
+  for (const change of [{ countryCode: 'US' }, { countryCode: null }, { paidLocalCurrency: '840' }, { paidLocalCurrency: 'USD' }, { paidLocalCurrency: 0 }, { paidLocalCurrency: ['THB'] }, { paidLocalCurrency: {} }, { sendingBank: '' }, { receivingBank: '999' }, { receivingBank: '004' }, { amount: 189 }, { receiver: { proxy: { type: 'MSISDN', value: '089xxx9999' } } }, { receiver: { proxy: { type: 'NATID', value: '081xxx5678' } } }]) assert.equal(slipokResult({ ...scb, data: { ...scb.data, ...change } }, true, 19000, target, bookedAt, now).status, 'rejected');
+  assert.equal(slipokResult(scb, true, 19000, { ...target, kind: 'bank', bankName: 'SCB', accountNumber: target.linkedBank.accountNumber, bankPromptPayPhone: target.accountNumber }, bookedAt, now).status, 'rejected');
+});
+
 test('SlipOK validates complete bank results, exact cents, visible receiver positions and booking time', () => {
   assert.equal(slipokResult(valid(), true, 19000, account, bookedAt, now).status, 'verified');
   for (const change of [ { amount: 190.001 }, { amount: 189 }, { receivingBank: '006' }, { countryCode: 'US' }, { paidLocalCurrency: '840' }, { transRef: '' }, { transDate: '20260901' }, { transTime: '23:59:59' }, { receiver: { account: { value: 'xxx-x-x9999-x' } } } ]) {

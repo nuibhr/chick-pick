@@ -4,6 +4,8 @@ import type { TidbDocuments, Audit } from './tidbDocuments';
 import type { ReceiptKV } from './pilot';
 import { fail } from './pilotDomain';
 import { verifySlipOk, slipokConfigured, type SlipOkEnv, type SlipVerification } from './slipok';
+import { needsCurrencyRecheck } from '../src/slipokCompatibility';
+import { digest } from './pilotAuth';
 
 function pendingReceipt(docs: FinanceDocuments, kind: 'game' | 'coaching', id: string, receiptId: string) {
   const row = kind === 'game' ? docs.marketplace.bookings.find(b => b.id === id) : docs.coaching.find(e => e.id === id);
@@ -20,16 +22,19 @@ export async function checkStoredReceipt(db: TidbDocuments, env: SlipOkEnv & { R
   const attemptId = crypto.randomUUID();
   const input = await db.updateFinance(docs => {
     const p = pendingReceipt(docs, kind, id, receiptId), old = p.receipt.verification;
-    if (old?.status === 'verified' || old?.status === 'rejected') fail(409, 'มีผลตรวจแล้ว ให้แอดมินอนุมัติหรือปฏิเสธสลิป');
+    const currencyRecovery = audit.actorType === 'admin' && needsCurrencyRecheck(old);
+    if (old?.status === 'verified' || old?.status === 'rejected' && !currencyRecovery) fail(409, 'มีผลตรวจแล้ว ให้แอดมินอนุมัติหรือปฏิเสธสลิป');
+    if (currencyRecovery && !/^[a-f0-9]{64}$/.test(p.receipt.sha256 || '')) fail(409, 'สลิปนี้ไม่มีข้อมูลยืนยันภาพเดิม กรุณาติดต่อเจ้าของก่อนตรวจใหม่');
     if (old?.retryAt && Date.parse(old.retryAt) > Date.now()) fail(429, 'ยังไม่ถึงเวลาตรวจใหม่ กรุณารอเวลาที่แจ้ง');
-    p.receipt.verification = { provider: 'slipok', status: 'checking', checkedAt: new Date().toISOString(), attemptId, retryAt: new Date(Date.now() + 45000).toISOString(), message: 'กำลังตรวจรายการกับ SlipOK' };
-    return { amount: p.amount, account: structuredClone(p.account), bookedAt: p.row.createdAt, mimeType: p.receipt.mimeType };
+    p.receipt.verification = { provider: 'slipok', status: 'checking', checkedAt: new Date().toISOString(), attemptId, retryAt: new Date(Date.now() + 45000).toISOString(), message: 'กำลังตรวจรายการกับ SlipOK', ...(currencyRecovery ? { currencyRecovery: true as const } : {}) };
+    return { amount: p.amount, account: structuredClone(p.account), bookedAt: p.row.createdAt, mimeType: p.receipt.mimeType, currencyRecovery, sha256: p.receipt.sha256 };
   }, { ...audit, action: 'slipok.check.started' });
   let result: SlipVerification;
   try {
     const image = await env.RECEIPTS!.get('receipt:' + receiptId, 'arrayBuffer');
     if (!image) throw Error('missing image');
-    result = await verifySlipOk(env, image, input.mimeType, input.amount, input.account, input.bookedAt);
+    if (input.currencyRecovery && await digest(new Uint8Array(image)) !== input.sha256) throw Error('image changed');
+    result = await verifySlipOk(env, image, input.mimeType, input.amount, input.account, input.bookedAt, fetch, input.currencyRecovery);
   } catch { result = { provider: 'slipok', status: 'retry', checkedAt: new Date().toISOString(), retryAt: new Date(Date.now() + 60000).toISOString(), message: 'ภาพหรือบริการตรวจยังไม่พร้อม กรุณาตรวจใหม่' }; }
   return db.updateFinance(docs => {
     const p = pendingReceipt(docs, kind, id, receiptId);
@@ -39,6 +44,7 @@ export async function checkStoredReceipt(db: TidbDocuments, env: SlipOkEnv & { R
       const receipts: ReceiptSubmission[] = [...docs.marketplace.bookings, ...docs.coaching].flatMap(row => row.receipts || []);
       if (receipts.some(r => r.id !== receiptId && (r.verifiedTransferReference === result.reference || r.verification?.status === 'verified' && r.verification.reference === result.reference))) result = { provider: 'slipok', status: 'rejected', checkedAt: result.checkedAt, code: 1012, message: 'รายการโอนนี้ถูกใช้กับสลิปอื่นในแอปแล้ว' };
     }
+    if (input.currencyRecovery && ['retry', 'unavailable'].includes(result.status)) result.currencyRecovery = true;
     p.receipt.verification = result; return result;
   }, { ...audit, action: 'slipok.check.completed' });
 }

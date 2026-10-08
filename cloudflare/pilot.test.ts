@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { pilotRequest, type PilotEnv } from './pilot';
 import { TidbDocuments } from './tidbDocuments';
-import { organizerKey } from './pilotAuth';
+import { organizerKey, digest } from './pilotAuth';
 import type { MarketplaceData } from '../src/marketplaceTypes';
 import type { PilotContext } from './pilotDomain';
 import Stripe from 'stripe';
@@ -15,6 +15,42 @@ import { PNG } from 'pngjs';
 import jsQR from 'jsqr';
 import generatePayload from 'promptpay-qr';
 const stripeAudit = { actorId: 'test', actorType: 'admin' as const, action: 'test.stripe', entityId: 'fixture' };
+
+test('admin repairs only currency parser failures from the same hashed image and still rejects reused transfers', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  Object.assign(f.env, { SLIPOK_API_KEY: 'fixture-private-secret', SLIPOK_BRANCH_ID: '77946' });
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  await f.request('/api/marketplace/setup/transfer-channels', { channels: [{ id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'Fixture', accountNumber: '0812345678', linkedBank: { bankName: 'SCB', accountNumber: '1234567890' } }] }, owner);
+  const rows = [];
+  for (const who of ['a', 'b', 'c', 'd']) {
+    const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who))).json()).booking.id;
+    const bytes = new Uint8Array([137,80,78,71,13,10,26,10,rows.length]);
+    const receipt = { id: crypto.randomUUID(), fileName: 'fixture.png', mimeType: 'image/png' as const, size: bytes.length, sha256: await digest(bytes), status: 'pending' as const, submittedAt: new Date().toISOString(), ocr: { status: 'unavailable' as const, amount: null, transferredAt: null, reference: null, sender: null, receiver: null, rawText: null, confidence: null }, verification: { provider: 'slipok' as const, status: 'rejected' as const, checkedAt: new Date().toISOString(), message: 'สลิปนี้ไม่ใช่รายการเงินบาทในประเทศไทย' } };
+    f.data.bookings.find(b => b.id === id)!.receipts = [receipt]; f.images.set('receipt:' + receipt.id, bytes.buffer);
+    rows.push({ id, receiptId: receipt.id });
+  }
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (_url: any, init: any) => {
+    calls++; assert.equal(init.body.has('log'), false); assert.equal(init.body.get('amount'), '190.00');
+    return Response.json({ success: true, data: { ...slipOKPayload().data, success: true, sendingBank: '014', receivingBank: '', paidLocalCurrency: null, paidLocalAmount: null, receiver: { displayName: 'Fixture', proxy: { type: 'MSISDN', value: '081xxx5678' }, account: { type: '', value: '' } } } });
+  });
+  const path = (r: typeof rows[number]) => `/api/marketplace/bookings/${r.id}/receipts/${r.receiptId}/verify`;
+  assert.equal((await f.request(path(rows[0]), {}, f.player('a'))).status, 401);
+  const attempts = await Promise.all([f.request(path(rows[0]), {}, owner), f.request(path(rows[0]), {}, owner)]);
+  assert.deepEqual(attempts.map(r => r.status).sort(), [200,429]); assert.equal(calls, 1);
+  assert.equal(f.data.bookings[0].receipts![0].verification!.status, 'verified');
+  assert.equal(f.data.bookings[0].paidAt, undefined);
+  assert.equal((await f.request(path(rows[1]), {}, owner)).status, 200);
+  assert.equal(f.data.bookings[1].receipts![0].verification!.code, 1012);
+  assert.equal((await f.request(path(rows[1]), { currencyRecovery: true }, owner)).status, 409);
+  f.images.set('receipt:' + rows[2].receiptId, new Uint8Array([1,2,3]).buffer);
+  assert.equal((await f.request(path(rows[2]), {}, owner)).status, 200); assert.equal(calls, 2);
+  assert.equal(f.data.bookings[2].receipts![0].verification!.status, 'retry');
+  assert.equal(f.data.bookings[2].receipts![0].verification!.currencyRecovery, true);
+  f.data.bookings[3].receipts![0].verification!.message = 'ผู้รับไม่ตรง'; f.data.bookings[3].receipts![0].verification!.code = 1014;
+  assert.equal((await f.request(path(rows[3]), { currencyRecovery: true }, owner)).status, 409); assert.equal(calls, 2);
+  assert.equal((await (await f.request('/api/finance/report', undefined, owner)).json()).summary.income, 0);
+});
 
 test('owner enables bank PromptPay for new game and coaching bookings; old booking destinations and QR amounts remain frozen', async t => {
   const f = fixture(t), owner = await f.signIn(), path = '/api/marketplace/setup/transfer-channels';
