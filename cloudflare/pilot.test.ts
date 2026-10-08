@@ -9,6 +9,7 @@ import Stripe from 'stripe';
 import { prepareCheckout, attachCheckout, applyStripeSession } from './stripePayments';
 import { cancel } from './pilotDomain';
 import { lessonHoldExpired } from '../src/coachingTypes';
+import { activeTransferAccount, type TransferSettings } from '../src/paymentChannels';
 const stripeAudit = { actorId: 'test', actorType: 'admin' as const, action: 'test.stripe', entityId: 'fixture' };
 
 function slipOKPayload(amount = 190, reference = 'SLIPOKTEST0001') {
@@ -274,12 +275,12 @@ function fixture(t: TestContext) {
   const lock = async <T>(fn:()=>T|Promise<T>) => { const previous=tail; let release:()=>void; tail=new Promise<void>(r=>release=r); await previous; try { return await fn(); } finally { release!(); } };
   t.mock.method(TidbDocuments.prototype,'readMarketplace',async()=>structuredClone(data));
   t.mock.method(TidbDocuments.prototype,'readDocument',async(key:string,fallback:unknown)=>structuredClone(docs.get(key)??fallback));
-  t.mock.method(TidbDocuments.prototype,'readTransferAccount',async()=>structuredClone(docs.get('transfer-account')||null));
+  t.mock.method(TidbDocuments.prototype,'readTransferAccount',async()=>activeTransferAccount(docs.get('transfer-account') as TransferSettings || null));
   t.mock.method(TidbDocuments.prototype,'updateDocument',async(key:string,fallback:unknown,mutate:(v:any)=>unknown)=>lock(async()=>{ const v=structuredClone(docs.get(key)??fallback); const result=await mutate(v); docs.set(key,v); return result; }));
-  t.mock.method(TidbDocuments.prototype,'updateMarketplace',async(mutate:(v:MarketplaceData,ctx:PilotContext)=>unknown)=>lock(async()=>{ const copy=structuredClone(data); const r=await mutate(copy,{account:docs.get('transfer-account') as any,enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,paymentProvider:(docs.get('worker-pilot') as any)?.paymentProvider || 'manual',closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)}); Object.assign(data,copy); return r; }));
+  t.mock.method(TidbDocuments.prototype,'updateMarketplace',async(mutate:(v:MarketplaceData,ctx:PilotContext)=>unknown)=>lock(async()=>{ const copy=structuredClone(data); const r=await mutate(copy,{account:activeTransferAccount(docs.get('transfer-account') as TransferSettings || null),enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,paymentProvider:(docs.get('worker-pilot') as any)?.paymentProvider || 'manual',closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)}); Object.assign(data,copy); return r; }));
   const financialSnapshot=()=>({marketplace:structuredClone(data),finance:structuredClone(docs.get('finance')||[]),coaching:structuredClone(docs.get('coaching')||[]),'coach-profiles':structuredClone(docs.get('coach-profiles')||[]),'coach-slots':structuredClone(docs.get('coach-slots')||[]),'revenue-config':structuredClone(docs.get('revenue-config')||[]),'revenue-settlements':structuredClone(docs.get('revenue-settlements')||[])});
   t.mock.method(TidbDocuments.prototype,'readFinance',async()=>financialSnapshot());
-  t.mock.method(TidbDocuments.prototype,'updateFinance',async(mutate:(v:any,ctx:PilotContext)=>unknown)=>lock(async()=>{const v=financialSnapshot();const result=await mutate(v,{account:docs.get('transfer-account') as any,enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,paymentProvider:(docs.get('worker-pilot') as any)?.paymentProvider || 'manual',closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)});Object.assign(data,v.marketplace);for(const key of ['finance','coaching','coach-profiles','coach-slots','revenue-config','revenue-settlements'])docs.set(key,v[key]);return result;}));
+  t.mock.method(TidbDocuments.prototype,'updateFinance',async(mutate:(v:any,ctx:PilotContext)=>unknown)=>lock(async()=>{const v=financialSnapshot();const result=await mutate(v,{account:activeTransferAccount(docs.get('transfer-account') as TransferSettings || null),enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,paymentProvider:(docs.get('worker-pilot') as any)?.paymentProvider || 'manual',closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)});Object.assign(data,v.marketplace);for(const key of ['finance','coaching','coach-profiles','coach-slots','revenue-config','revenue-settlements'])docs.set(key,v[key]);return result;}));
   const env:PilotEnv={TIDB_DATABASE_URL:'mysql://fixture:fixture@gateway01.ap-southeast-1.prod.aws.tidbcloud.com/test',LINE_CHANNEL_ID:'test-channel',VITE_LIFF_ID:'test-liff',ADMIN_SESSION_SECRET:'test-only-secret-for-cookie-signing',ADMIN_PAIRING_TOKEN:'TEST12CODEAB',RECEIPTS:{put:async(k,v)=>{images.set(k,v);},get:async k=>images.get(k)||null,delete:async k=>{images.delete(k);}}};
   const verify=async(token:string)=>{if(!token.startsWith('test-line-token-'))throw Error('invalid'); return {sub:token.slice(16),name:token.slice(16)};};
   const request=async(path:string,body?:unknown,headers:Record<string,string>={},method=body===undefined?'GET':'POST')=>pilotRequest(new Request('https://example.com'+path,{method,headers:{...(body===undefined?{}:{'Content-Type':'application/json'}),...headers},body:body===undefined?undefined:JSON.stringify(body)}),env,verify);
@@ -594,4 +595,57 @@ test('coach Stripe booking derives amount from its slot and holds it until Strip
   const session = { id: 'cs_expired', metadata: { app: 'chick-pick', kind: 'coaching', bookingId: lesson.id, attemptId: p.attemptId }, client_reference_id: lesson.id, amount_total: 110000, currency: 'thb', livemode: false, status: 'expired', payment_status: 'unpaid' } as any;
   await db.updateFinance(docs => applyStripeSession(docs, session, 'test', 'evt_expired'), stripeAudit);
   docs = await db.readFinance(); assert.equal(lessonHoldExpired(docs.coaching[0]), true); assert.equal(docs.coaching[0].paidAt, undefined);
+});
+
+
+test('owner channel toggles preserve game and coaching snapshots, block new bookings when all off, and cannot be changed by staff', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  const channels = [
+    { id: 'bank', kind: 'bank', enabled: true, bankName: 'BAY', accountName: 'Bank fixture', accountNumber: '1234567890' },
+    { id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'Phone fixture', accountNumber: '0812345678', linkedBank: { bankName: 'KBANK', accountNumber: '9876543210' } },
+  ];
+  const path = '/api/marketplace/setup/transfer-channels';
+  assert.equal((await f.request(path, { channels })).status, 401);
+  assert.equal((await f.request(path, { channels }, owner)).status, 200);
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  const booking = await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json();
+  assert.ok(booking.booking.id); assert.equal(f.data.bookings[0].transferAccount!.alternatives![0].accountNumber, '0812345678');
+  const coach = await (await f.request('/api/coaching/coaches', { name: 'Fixture', specialty: 'Test', bio: '', venue: 'Court', hourlyRate: 550, bookingFee: 100, active: true }, owner)).json();
+  const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start: new Date(Math.ceil((Date.now() + 86400000) / 1800000) * 1800000).toISOString(), hours: 1, status: 'open' }, owner)).json();
+  const lesson = await (await f.request('/api/player/lessons', { slotId: slot.id }, f.player('a'))).json();
+  assert.ok(lesson.id);
+  const invite = await (await f.request('/api/finance/admin-team', { action: 'invite', roles: ['operator','finance'] }, owner)).json();
+  const signed = await f.request('/api/finance/auth', { idToken: 'test-line-token-staff', pairingToken: invite.code });
+  const staff = { Cookie: signed.headers.get('set-cookie')!.split(';')[0] };
+  assert.equal((await f.request(path, { channels: [] }, staff)).status, 403);
+  const staffSetup = await (await f.request('/api/marketplace/setup', undefined, staff)).json();
+  assert.equal(staffSetup.transferChannels, undefined);
+  assert.equal((await f.request(path, { channels: channels.map(c => ({ ...c, enabled: false })) }, owner)).status, 200);
+  const config = await (await f.request('/api/player/config')).json(); assert.equal(config.bookingEnabled, false);
+  assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('b'))).status, 503);
+  assert.equal((await f.request('/api/player/lessons', { slotId: slot.id }, f.player('b'))).status, 503);
+  assert.equal(f.data.bookings[0].transferAccount!.alternatives![0].accountNumber, '0812345678');
+  const lessons = await (await f.request('/api/player/lessons', undefined, f.player('a'))).json();
+  assert.equal(lessons.lessons[0].transferAccount.alternatives[0].accountNumber, '0812345678');
+  assert.equal(lessons.lessons[0].transferAccount.alternatives[0].linkedBank, undefined);
+  assert.equal((await f.request('/api/marketplace/setup/transfer-account', channels[0], owner)).status, 409);
+  assert.equal((await f.request(path, { channels: [{ ...channels[1], accountNumber: '12345' }] }, owner)).status, 400);
+});
+
+test('PromptPay image verification fills admin approval from stored results and records income once', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  Object.assign(f.env, { SLIPOK_API_KEY: 'fixture-private-secret', SLIPOK_BRANCH_ID: '77946' });
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  await f.request('/api/marketplace/setup/transfer-channels', { channels: [{ id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'Phone fixture', accountNumber: '0812345678' }] }, owner);
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
+  t.mock.method(globalThis, 'fetch', async (_url: any, init: any) => { assert.equal(init.body.get('amount'), '190.00'); const p = slipOKPayload(); p.data.receiver = { ...p.data.receiver, proxy: { type: 'MSISDN', value: '081xxx5678' } } as any; return Response.json(p); });
+  const response = await pilotRequest(new Request(`https://example.com/api/player/bookings/${id}/receipt`, { method: 'POST', headers: { ...f.player('a'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,1]) }), f.env, f.verify);
+  const submitted = await response!.json(); assert.equal(submitted.receipt.verification.status, 'verified'); assert.equal(submitted.receipt.verification.paymentChannel, 'promptpay');
+  assert.equal(f.data.bookings[0].paidAt, undefined);
+  const path = `/api/marketplace/bookings/${id}/receipts/${submitted.receipt.id}/review`;
+  assert.equal((await f.request(path, { action: 'approve' }, owner)).status, 400);
+  assert.equal((await f.request(path, { action: 'approve', fundsChecked: true }, owner)).status, 200);
+  assert.equal((await f.request(path, { action: 'approve', fundsChecked: true }, owner)).status, 409);
+  const report = await (await f.request('/api/finance/report', undefined, owner)).json(); assert.equal(report.summary.income, 19000);
+  assert.equal(f.data.bookings[0].admissionStatus, 'pending');
 });

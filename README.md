@@ -6,6 +6,8 @@ The Cloudflare + TiDB app uses LINE owner/staff authentication, real Open Play a
 
 See [README-SLIPOK.md](README-SLIPOK.md) for the active payment setup and limitations, [README-STRIPE.md](README-STRIPE.md) for legacy Stripe records, and [LAUNCH-REVIEW-2026-10-08.md](LAUNCH-REVIEW-2026-10-08.md) for current deployment and live interaction evidence.
 
+Owner-configurable bank and phone PromptPay channels now support separate recipients, independent visibility, booking-time snapshots, copy actions and locally generated amount-prefilled QR images. Verified SlipOK results supply approval amounts and references on the server; manual funds confirmation remains required. See [PAYMENT-CHANNELS-2026-10-08.md](PAYMENT-CHANNELS-2026-10-08.md) for setup, 77-test validation and deployment evidence. The second recipient still needs the owner's real details and SlipOK account configuration.
+
 ## Run locally
 
 Requires Node.js 22 or newer.
@@ -43,10 +45,10 @@ npm run build
 
 ## MVP limitations / next priorities
 
-The local development server remains a prototype. The Cloudflare app has TiDB-backed booking and manual payment-review APIs with transactional audit records. Stripe is an owner-selectable payment provider once server secrets are configured. Manual receipt approval does not move money; Stripe test payments do not count as real income. Payment-provider configuration and code tests do not prove a successful live payment or bank payout.
+The local development server remains a prototype. The Cloudflare app has TiDB-backed booking and manual payment-review APIs with transactional audit records. New hosted bookings use transfer slips and SlipOK; legacy Stripe records remain for reconciliation. Manual receipt approval does not move money; historical Stripe test payments do not count as real income. Payment-provider configuration and code tests do not prove a successful live payment or bank payout.
 
 1. Complete ordinary-member mobile testing of the Published LINE MINI App and LIFF ID on HTTPS. The single local organizer password and coaching demo access belong to the Node preview, not the hosted LINE staff system.
-2. Configure and test Stripe PromptPay Checkout and webhook delivery before live activation; add payment reconciliation, backups and retry monitoring. Local coaching and DUPR state still use files. Existing slip approval stays manual.
+2. Configure both receiving accounts in SlipOK and the owner payment-channel settings, then test a valid ordinary-member transfer and approval before live activation; add payment reconciliation, backups and retry monitoring. Local coaching and DUPR state still use files. Slip approval stays manual.
 3. Define paid-booking refunds and settlement reversal/correction workflows, coach availability and course expiry. Unpaid bookings can now be cancelled, but they do not expire automatically.
 4. Separate estimated fees from actual provider fees and reconcile platform operating expenses before treating any displayed share as profit.
 5. Finish mobile browser acceptance testing and operational monitoring before public launch.

@@ -7,6 +7,7 @@ import { lessonView } from './coachingDomain';
 import { TidbDocuments } from './tidbDocuments';
 import { ownProfile, profileSettings, updateProfile } from '../server/playerProfiles';
 import { pilotRequest, type ReceiptKV } from './pilot';
+import { publicTransferAccount } from '../src/paymentChannels';
 
 type Env = StripeEnv & SlipOkEnv & {
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -163,7 +164,7 @@ export default {
             const receipt = booking.receipts?.at(-1);
             return {
               id: booking.id, sessionId: booking.sessionId, amount: booking.amount, title: booking.title,
-              transferAccount: booking.transferAccount || null, createdAt: booking.createdAt,
+              transferAccount: publicTransferAccount(booking.transferAccount), createdAt: booking.createdAt,
               paidAt: booking.paidAt || null, admissionStatus: booking.admissionStatus || 'pending',
               cancelledAt: booking.cancelledAt || null,
               stripe: stripePublicView(booking.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null,

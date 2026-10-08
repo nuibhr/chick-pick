@@ -5,6 +5,7 @@ import type { FinanceDocuments } from './financeDomain';
 import { fail, type Actor } from './pilotDomain';
 import { recordVerifiedTransfer } from './receiptVerification';
 import { stripeLocksPayment, stripePublicView } from '../src/paymentTypes';
+import { publicTransferAccount } from '../src/paymentChannels';
 
 const active = (e: Enrollment) => !e.cancelledAt && !lessonHoldExpired(e) && e.lessons.some(l => l.status !== 'cancelled');
 const reserved = (docs: FinanceDocuments, slot: CoachSlot) => docs.coaching.some(e => e.coachId === slot.coachId && active(e) && e.lessons.some(l => l.status !== 'cancelled' && Date.parse(l.start) < Date.parse(slot.start) + slot.hours * 3600000 && Date.parse(l.start) + l.hours * 3600000 > Date.parse(slot.start)));
@@ -113,5 +114,5 @@ export function completeLesson(docs: FinanceDocuments, id: string) {
 
 export function lessonView(e: Enrollment) {
   const receipt = e.receipts?.at(-1);
-  return { kind: 'coaching' as const, id: e.id, sessionId: e.lessons[0]?.slotId || '', title: e.title, startsAt: e.lessons[0]?.start, venue: e.venue || '', hours: e.totalHours, amount: Math.round(e.amount * 100), createdAt: e.createdAt, holdExpiresAt: e.holdExpiresAt || null, paidAt: e.paidAt || null, admissionStatus: e.payment === 'paid' ? 'approved' : 'pending', cancelledAt: e.cancelledAt || (lessonHoldExpired(e) ? e.holdExpiresAt : null), transferAccount: e.transferAccount || null, completed: e.lessons.every(l => l.status === 'completed'), stripe: stripePublicView(e.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null };
+  return { kind: 'coaching' as const, id: e.id, sessionId: e.lessons[0]?.slotId || '', title: e.title, startsAt: e.lessons[0]?.start, venue: e.venue || '', hours: e.totalHours, amount: Math.round(e.amount * 100), createdAt: e.createdAt, holdExpiresAt: e.holdExpiresAt || null, paidAt: e.paidAt || null, admissionStatus: e.payment === 'paid' ? 'approved' : 'pending', cancelledAt: e.cancelledAt || (lessonHoldExpired(e) ? e.holdExpiresAt : null), transferAccount: publicTransferAccount(e.transferAccount), completed: e.lessons.every(l => l.status === 'completed'), stripe: stripePublicView(e.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null };
 }

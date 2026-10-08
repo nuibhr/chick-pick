@@ -13,6 +13,7 @@ import type { Venue } from '../src/venueTypes';
 import { paymentRow, syncPayment, stripeReadiness, stripeWebhook, type StripeEnv } from './stripePayments';
 import { checkSlipOkConnection, slipokConfigured, type SlipOkEnv } from './slipok';
 import { checkStoredReceipt } from './slipokReceipts';
+import { configuredChannels, parsePaymentChannels, type TransferSettings } from '../src/paymentChannels';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
 export type PilotEnv = StripeEnv & SlipOkEnv & { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
@@ -233,8 +234,8 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     }
     if (path === '/api/marketplace/setup') {
       if (request.method !== 'GET') fail(405, 'ใช้ GET');
-      const [account, venues, docs, pilot] = await Promise.all([db.readTransferAccount(), db.readDocument<Venue[]>('court-venues', []), db.readFinance(), db.readDocument<{ bookingEnabled: boolean; paymentProvider?: 'manual' | 'stripe' }>('worker-pilot', { bookingEnabled: false })]);
-      return json({ transferAccount: permissions(owner.roles).receipts ? account : null, pilot: { ...pilot, paymentProvider: 'manual' }, ownerName: owner.name, role: owner.role, roles: owner.roles, ocrConfigured: false, slipokConfigured: slipokConfigured(env), slipokBranchId: env.SLIPOK_BRANCH_ID || null, stripeRetired: true, stripeConfigured: stripe.configured, stripeMode: stripe.mode, readiness: bookingReadiness(docs, venues, account, Boolean(env.RECEIPTS)) });
+      const [account, venues, docs, pilot, transferSettings] = await Promise.all([db.readTransferAccount(), db.readDocument<Venue[]>('court-venues', []), db.readFinance(), db.readDocument<{ bookingEnabled: boolean; paymentProvider?: 'manual' | 'stripe' }>('worker-pilot', { bookingEnabled: false }), db.readDocument<TransferSettings | null>('transfer-account', null)]);
+      return json({ transferAccount: permissions(owner.roles).receipts ? account : null, transferChannels: permissions(owner.roles).configure ? configuredChannels(transferSettings) : undefined, pilot: { ...pilot, paymentProvider: 'manual' }, ownerName: owner.name, role: owner.role, roles: owner.roles, ocrConfigured: false, slipokConfigured: slipokConfigured(env), slipokBranchId: env.SLIPOK_BRANCH_ID || null, stripeRetired: true, stripeConfigured: stripe.configured, stripeMode: stripe.mode, readiness: bookingReadiness(docs, venues, account, Boolean(env.RECEIPTS)) });
     }
     if (path === '/api/marketplace/setup/payment' && request.method === 'POST') {
       const v = await body(request);
@@ -245,7 +246,13 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     }
     if (path === '/api/marketplace/setup/transfer-account' && request.method === 'POST') {
       const account = transferAccount(await body(request)); if (!account) fail(400, 'ระบุธนาคาร ชื่อบัญชี และเลขบัญชี 10–15 หลัก');
-      await db.updateDocument('transfer-account', {} as Record<string, unknown>, saved => Object.assign(saved, account), audit(owner, 'transfer_account.updated', 'transfer-account', true)); return json({ transferAccount: account });
+      await db.updateDocument('transfer-account', {} as Record<string, unknown>, saved => { if (saved.channels !== undefined) fail(409, 'ใช้หน้าช่องทางรับเงินเพื่อแก้บัญชีที่เปิด–ปิดได้'); Object.assign(saved, account); }, audit(owner, 'transfer_account.updated', 'transfer-account', true)); return json({ transferAccount: account });
+    }
+    if (path === '/api/marketplace/setup/transfer-channels' && request.method === 'POST') {
+      const channels = parsePaymentChannels((await body(request)).channels);
+      if (!channels) fail(400, 'ระบุชื่อผู้รับและเลขบัญชีให้ถูกต้อง พร้อมเพย์ใช้เบอร์มือถือไทย 10 หลัก บัญชีที่ผูกต้องระบุธนาคารและเลขบัญชีคู่กัน');
+      await db.updateDocument<TransferSettings, void>('transfer-account', {}, saved => { saved.channels = channels; }, audit(owner, 'transfer_channels.updated', 'transfer-account', true));
+      return json({ transferChannels: channels });
     }
     if (path === '/api/marketplace/setup/pilot' && request.method === 'POST') {
       const v = await body(request), settings = await db.readDocument<{ paymentProvider?: 'manual' | 'stripe' }>('worker-pilot', {}); if (typeof v.bookingEnabled !== 'boolean') fail(400, 'เลือกเปิดหรือปิดรับจอง');

@@ -214,9 +214,9 @@ export default function PlayerApp() {
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) { setError('เลือกภาพ JPG, PNG หรือ WebP ขนาดไม่เกิน 5 MB'); return; }
     setBusy(true); setError('');
     try {
-      const submitted = await api<{ verification?: import('../cloudflare/slipok').SlipVerification }>((booking.kind === 'coaching' ? '/lessons/' : '/bookings/') + encodeURIComponent(booking.id) + '/receipt', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': file.type }, body: file });
+      const submitted = await api<{ receipt: { verification?: import('../cloudflare/slipok').SlipVerification } }>((booking.kind === 'coaching' ? '/lessons/' : '/bookings/') + encodeURIComponent(booking.id) + '/receipt', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': file.type }, body: file });
       const own = await api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } });
-      setBookings(own.bookings); setNotice(submitted.verification?.status === 'verified' ? 'SlipOK ตรวจผ่านแล้ว รอแอดมินอนุมัติเงิน' : submitted.verification?.status === 'rejected' ? 'ภาพส่งถึงระบบแล้ว แต่ SlipOK ไม่ผ่าน กรุณาดูเหตุผลในรายการจอง' : 'ภาพส่งถึงระบบแล้ว รอผู้จัดตรวจ ไม่ต้องโอนซ้ำ');
+      setBookings(own.bookings); setNotice(submitted.receipt?.verification?.status === 'verified' ? 'SlipOK ตรวจผ่านแล้ว รอแอดมินอนุมัติเงิน' : submitted.receipt?.verification?.status === 'rejected' ? 'ภาพส่งถึงระบบแล้ว แต่ SlipOK ไม่ผ่าน กรุณาดูเหตุผลในรายการจอง' : 'ภาพส่งถึงระบบแล้ว รอผู้จัดตรวจ ไม่ต้องโอนซ้ำ');
     } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); }
     finally { setBusy(false); }
   };
