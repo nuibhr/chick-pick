@@ -11,7 +11,7 @@ import { bookingReadiness } from './bookingReadiness';
 import { memberRoles, permissions } from '../src/adminRoles';
 import type { Venue } from '../src/venueTypes';
 import { paymentRow, syncPayment, stripeReadiness, stripeWebhook, type StripeEnv } from './stripePayments';
-import { slipokConfigured, type SlipOkEnv } from './slipok';
+import { checkSlipOkConnection, slipokConfigured, type SlipOkEnv } from './slipok';
 import { checkStoredReceipt } from './slipokReceipts';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
@@ -174,13 +174,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     }
     if (path === '/api/marketplace/setup/slipok') {
       if (request.method !== 'GET') fail(405, 'ใช้ GET');
-      if (!slipokConfigured(env)) return json({ configured: false, connected: false, quota: null, message: 'ตั้ง SLIPOK_API_KEY ใน Cloudflare Secret ก่อน' });
-      try {
-        const r = await fetch('https://api.slipok.com/api/line/apikey/' + env.SLIPOK_BRANCH_ID + '/quota', { headers: { 'x-authorization': env.SLIPOK_API_KEY! }, redirect: 'error', signal: AbortSignal.timeout(8000) });
-        const v = await r.json() as { success?: boolean; data?: { quota?: unknown; overQuota?: unknown } };
-        if (!r.ok || v.success !== true || typeof v.data?.quota !== 'number' || !Number.isFinite(v.data.quota)) throw Error('invalid quota');
-        return json({ configured: true, connected: true, quota: v.data.quota, overQuota: typeof v.data.overQuota === 'number' && Number.isFinite(v.data.overQuota) ? v.data.overQuota : null, message: 'เชื่อม SlipOK ได้แล้ว ยังต้องทดลองตรวจสลิปของการจองจริง' });
-      } catch { return json({ configured: true, connected: false, quota: null, message: 'SlipOK ไม่ยืนยันคีย์หรือโควต้า กรุณาตรวจ Secret สาขา และแพ็กเกจ' }); }
+      return json(await checkSlipOkConnection(env));
     }
     if (path === '/api/marketplace/venues' && request.method === 'GET') return json({ venues: await db.readDocument<Venue[]>('court-venues', []) });
     if (/^\/api\/marketplace\/venues(?:\/[^/]+)?$/.test(path) && request.method === 'POST') {

@@ -7,6 +7,38 @@ export type SlipVerification = {
   transferredAt?: string; receiver?: string; attemptId?: string; retryAt?: string;
 };
 export const slipokConfigured = (env: SlipOkEnv) => Boolean(env.SLIPOK_API_KEY && !/[\s\x00-\x1f]/.test(env.SLIPOK_API_KEY) && /^\d{1,10}$/.test(env.SLIPOK_BRANCH_ID || ''));
+export type SlipOkConnection = { configured: boolean; connected: boolean; quota: number | null; overQuota?: number | null; message: string; checkedAt: string; diagnostic?: string; upstreamStatus?: number | null };
+class SlipOkTransportError extends Error {
+  constructor(readonly reason: 'upstream_redirect' | 'response_format' | 'response_size' | 'quota_response', readonly status: number) { super(reason); }
+}
+// workerd rejects redirect:'error'. Manual mode preserves the no-credential-forwarding rule.
+async function slipokRequest(env: SlipOkEnv, suffix: '' | '/quota', init: RequestInit, timeout: number, transport: typeof fetch) {
+  const response = await transport('https://api.slipok.com/api/line/apikey/' + env.SLIPOK_BRANCH_ID + suffix, { ...init, headers: { 'x-authorization': env.SLIPOK_API_KEY! }, redirect: 'manual', signal: AbortSignal.timeout(timeout) });
+  if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); throw new SlipOkTransportError('upstream_redirect', response.status); }
+  return response;
+}
+async function slipokJson(response: Response): Promise<unknown> {
+  if (Number(response.headers.get('Content-Length')) > 32768) { await response.body?.cancel(); throw new SlipOkTransportError('response_size', response.status); }
+  const reader = response.body?.getReader(), decoder = new TextDecoder(); let raw = '', size = 0;
+  if (reader) while (true) { const next = await reader.read(); if (next.done) break; size += next.value.length; if (size > 32768) { await reader.cancel(); throw new SlipOkTransportError('response_size', response.status); } raw += decoder.decode(next.value, { stream: true }); }
+  raw += decoder.decode();
+  try { return JSON.parse(raw); } catch { throw new SlipOkTransportError('response_format', response.status); }
+}
+function connectionFailure(cause: unknown) {
+  const diagnostic = cause instanceof SlipOkTransportError ? cause.reason : cause instanceof Error && ['TimeoutError', 'AbortError'].includes(cause.name) ? 'timeout' : 'network';
+  const upstreamStatus = cause instanceof SlipOkTransportError ? cause.status : null;
+  const message = diagnostic === 'timeout' ? 'SlipOK ตอบช้าเกินเวลา กรุณาตรวจใหม่' : diagnostic === 'upstream_redirect' ? 'SlipOK ส่งต่อคำขอ ระบบหยุดไว้เพื่อรักษาคีย์ กรุณาติดต่อผู้จัด' : upstreamStatus !== null ? `SlipOK ตอบ HTTP ${upstreamStatus} แต่ข้อมูลยังตรวจยืนยันไม่ได้ กรุณาติดต่อผู้จัด` : 'ติดต่อ SlipOK ไม่สำเร็จ ภาพยังเก็บอยู่ กรุณาตรวจใหม่';
+  return { diagnostic, upstreamStatus, message };
+}
+export async function checkSlipOkConnection(env: SlipOkEnv, transport: typeof fetch = fetch): Promise<SlipOkConnection> {
+  const checkedAt = new Date().toISOString();
+  if (!slipokConfigured(env)) return { configured: false, connected: false, quota: null, checkedAt, message: 'ยังไม่ตั้งคีย์ SlipOK ฝั่งเซิร์ฟเวอร์' };
+  try {
+    const r = await slipokRequest(env, '/quota', {}, 8000, transport), v = object(await slipokJson(r)), data = object(v.data);
+    if (!r.ok || v.success !== true || typeof data.quota !== 'number' || !Number.isFinite(data.quota) || data.quota < 0) throw new SlipOkTransportError('quota_response', r.status);
+    return { configured: true, connected: true, quota: data.quota, overQuota: typeof data.overQuota === 'number' && Number.isFinite(data.overQuota) ? data.overQuota : null, checkedAt, message: 'เชื่อม SlipOK ได้แล้ว · การตรวจผ่านยังรอแอดมินอนุมัติเงิน' };
+  } catch (cause) { return { configured: true, connected: false, quota: null, checkedAt, ...connectionFailure(cause) }; }
+}
 const short = (v: unknown, max = 120) => typeof v === 'string' ? v.trim().slice(0, max) : '';
 const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
 const banks: Record<string, string[]> = {
@@ -65,10 +97,7 @@ export async function verifySlipOk(env: SlipOkEnv, image: ArrayBuffer, mimeType:
     const form = new FormData();
     form.append('files', new Blob([image], { type: mimeType }), 'slip.' + (mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg'));
     form.append('log', 'true'); form.append('amount', (amount / 100).toFixed(2));
-    const r = await transport('https://api.slipok.com/api/line/apikey/' + env.SLIPOK_BRANCH_ID, { method: 'POST', headers: { 'x-authorization': env.SLIPOK_API_KEY! }, body: form, redirect: 'error', signal: AbortSignal.timeout(18000) });
-    if (Number(r.headers.get('Content-Length')) > 32768) throw Error('large response');
-    const reader = r.body?.getReader(); const decoder = new TextDecoder(); let raw = '', size = 0;
-    if (reader) while (true) { const next = await reader.read(); if (next.done) break; size += next.value.length; if (size > 32768) { await reader.cancel(); throw Error('large response'); } raw += decoder.decode(next.value, { stream: true }); }
-    raw += decoder.decode(); return slipokResult(JSON.parse(raw), r.ok, amount, account, bookedAt);
-  } catch { return { provider: 'slipok', status: 'retry', checkedAt, retryAt: new Date(Date.now() + 60000).toISOString(), message: 'ติดต่อ SlipOK ไม่สำเร็จ ภาพยังเก็บอยู่ กรุณาตรวจใหม่' }; }
+    const r = await slipokRequest(env, '', { method: 'POST', body: form }, 18000, transport);
+    return slipokResult(await slipokJson(r), r.ok, amount, account, bookedAt);
+  } catch (cause) { return { provider: 'slipok', status: 'retry', checkedAt, retryAt: new Date(Date.now() + 60000).toISOString(), message: connectionFailure(cause).message }; }
 }
