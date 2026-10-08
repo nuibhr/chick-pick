@@ -9,3 +9,11 @@
 .wp-payment-channel { display: grid; gap: 12px; padding: 20px; border: 1px solid #dfe7e0; border-radius: 16px; min-width: 0; }
 .wp-payment-channel legend { display: flex; align-items: center; gap: 8px; padding: 0 8px; font-weight: 750; }
 .wp-payment-channel small { line-height: 1.7; color: #607265; }
+.wp-verified-transfer { margin: 0; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; background: #f0f6eb; padding: 16px; border-radius: 14px; }
+.wp-verified-transfer dt { font-size: 11px; color: var(--wp-muted); margin-bottom: 6px; }
+.wp-verified-transfer dd { margin: 0; font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
+.wp-review details { border: 1px solid var(--wp-line); border-radius: 12px; padding: 12px; }
+.wp-review summary { cursor: pointer; font-size: 12px; min-height: 32px; }
+.wp-review details[open] > :not(summary) { margin-top: 12px; }
+.wp-bank-qr { display: grid; gap: 10px; border-top: 1px solid var(--wp-line); padding-top: 14px; }
+@media(max-width:600px) { .wp-verified-transfer { grid-template-columns: 1fr; } }

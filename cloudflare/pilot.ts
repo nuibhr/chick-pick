@@ -13,7 +13,9 @@ import type { Venue } from '../src/venueTypes';
 import { paymentRow, syncPayment, stripeReadiness, stripeWebhook, type StripeEnv } from './stripePayments';
 import { checkSlipOkConnection, slipokConfigured, type SlipOkEnv } from './slipok';
 import { checkStoredReceipt } from './slipokReceipts';
-import { configuredChannels, parsePaymentChannels, type TransferSettings } from '../src/paymentChannels';
+import { configuredChannels, parsePaymentChannels, transferOptions, type TransferSettings } from '../src/paymentChannels';
+import { createQrTicket, readQrTicket, paymentQrPayload, paymentQrPng, paymentQrPage } from './paymentQr';
+import { stripeLocksPayment } from '../src/paymentTypes';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
 export type PilotEnv = StripeEnv & SlipOkEnv & { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
@@ -49,14 +51,45 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
   const coachPlayer = path === '/api/player/lessons' || /^\/api\/player\/lessons\/[^/]+\/(receipt|cancel)$/.test(path);
   const coachPublic = path === '/api/coach-catalog' || path === '/api/venues';
   const stripePlayer = path === '/api/player/payments/checkout' || path === '/api/player/payments/sync';
+  const qrPlayer = ['/api/player/payments/qr', '/api/player/payments/qr/image', '/api/player/payments/qr/view'].includes(path);
   const handled = stripePlayer || path === '/api/stripe/webhook' || path === '/api/player/config' || path.startsWith('/api/finance/') || path.startsWith('/api/marketplace') || path === '/api/coaching' || path.startsWith('/api/coaching/') || coachPublic || coachPlayer || playerMutation;
-  if (!handled) return null;
+  if (!handled && !qrPlayer) return null;
   try {
     if (!['GET', 'POST'].includes(request.method)) fail(405, 'วิธีส่งคำขอไม่รองรับ');
     if (request.method === 'POST' && (request.headers.get('Sec-Fetch-Site') === 'cross-site' || request.headers.has('Origin') && request.headers.get('Origin') !== new URL(request.url).origin)) fail(403, 'ไม่อนุญาตคำขอข้ามเว็บไซต์');
     if (!env.TIDB_DATABASE_URL) fail(503, 'ฐานข้อมูลยังไม่พร้อม');
     const db = new TidbDocuments(env.TIDB_DATABASE_URL);
     const stripe = stripeReadiness(env);
+    if (qrPlayer) {
+      if (!env.ADMIN_SESSION_SECRET) fail(503, 'ระบบ QR ยังไม่พร้อม');
+      let claims;
+      if (path === '/api/player/payments/qr') {
+        if (request.method !== 'POST') fail(405, 'ใช้ POST');
+        const actor = await identity(request, env, verify), v = await body(request);
+        if (!['game', 'coaching'].includes(String(v.kind)) || typeof v.id !== 'string' || !['bank', 'promptpay'].includes(String(v.channel))) fail(400, 'เลือกช่องทางและการจองที่ถูกต้อง');
+        const row = paymentRow(await db.readFinance(), v.kind as 'game' | 'coaching', v.id as string);
+        if (row.playerId !== 'line:' + actor.sub) fail(404, 'ไม่พบการจองของคุณ');
+        claims = { kind: v.kind as 'game' | 'coaching', id: v.id as string, channel: v.channel as string };
+      } else {
+        if (request.method !== 'GET') fail(405, 'ใช้ GET');
+        claims = await readQrTicket(env.ADMIN_SESSION_SECRET, new URL(request.url).searchParams.get('ticket') || '');
+        if (!claims) fail(410, 'ลิงก์ QR หมดอายุหรือไม่ถูกต้อง กลับไปเปิด QR จากรายการจองใน LINE');
+      }
+      const row = paymentRow(await db.readFinance(), claims.kind, claims.id);
+      if (row.cancelledAt || row.paidAt || row.receipts?.at(-1)?.status === 'pending' || stripeLocksPayment(row.stripe)) fail(409, 'รายการนี้ไม่เปิด QR สำหรับการโอนซ้ำ');
+      if ('holdExpiresAt' in row && row.holdExpiresAt && Date.parse(row.holdExpiresAt) <= Date.now()) fail(410, 'เวลาจองหมดแล้ว');
+      const account = transferOptions(row.transferAccount).find(c => (c.kind || 'bank') === claims.channel);
+      if (!account) fail(404, 'ช่องทางนี้ไม่ได้อยู่ในการจอง');
+      const amount = claims.kind === 'game' ? row.amount : Math.round(row.amount * 100);
+      let payload: string; try { payload = paymentQrPayload(account, amount); } catch { return fail(409, 'ยังไม่ได้เพิ่ม QR รับเงินของธนาคารสำหรับการจองนี้ ใช้เลขบัญชีที่แสดง'); }
+      if (path === '/api/player/payments/qr') {
+        const ticket = await createQrTicket(env.ADMIN_SESSION_SECRET, claims);
+        return json({ url: new URL('/api/player/payments/qr/view?ticket=' + ticket, request.url).href });
+      }
+      const headers = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' };
+      if (path.endsWith('/view')) return new Response(paymentQrPage(new URL(request.url).searchParams.get('ticket')!, account.accountName, amount, account.kind !== 'promptpay'), { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" } });
+      return new Response(await paymentQrPng(payload), { headers: { ...headers, 'Content-Type': 'image/png', 'Content-Disposition': (new URL(request.url).searchParams.get('download') === '1' ? 'attachment' : 'inline') + '; filename="chick-pick-payment-qr.png"' } });
+    }
     if (path === '/api/stripe/webhook') {
       if (request.method !== 'POST') fail(405, 'ใช้ POST');
       return json(await stripeWebhook(db, env, new TextDecoder().decode(await bytes(request, 512 * 1024)), request.headers.get('Stripe-Signature') || ''));

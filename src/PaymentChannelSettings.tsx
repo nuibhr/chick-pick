@@ -1,9 +1,11 @@
 import { useState, type FormEvent } from 'react';
 import { Building2, Smartphone, ShieldCheck } from 'lucide-react';
 import type { PaymentChannel } from './paymentChannels';
+import BankQrInput from './BankQrInput';
 
 export default function PaymentChannelSettings({ channels, busy, save }: { channels: PaymentChannel[]; busy: boolean; save: (channels: PaymentChannel[]) => Promise<boolean> }) {
-  const [bank, setBank] = useState(channels.find(c => c.kind === 'bank') || { id: 'bank' as const, kind: 'bank' as const, enabled: false, bankName: '', accountName: '', accountNumber: '' });
+  const [readingQr, setReadingQr] = useState(false);
+  const [bank, setBank] = useState<PaymentChannel>(channels.find(c => c.kind === 'bank') || { id: 'bank', kind: 'bank', enabled: false, bankName: '', accountName: '', accountNumber: '' });
   const [phone, setPhone] = useState(channels.find(c => c.kind === 'promptpay') || { id: 'promptpay' as const, kind: 'promptpay' as const, enabled: false, bankName: 'พร้อมเพย์', accountName: '', accountNumber: '' });
   const [linked, setLinked] = useState(Boolean(phone.linkedBank));
   const [linkedName, setLinkedName] = useState(phone.linkedBank?.bankName || ''), [linkedNumber, setLinkedNumber] = useState(phone.linkedBank?.accountNumber || '');
@@ -17,9 +19,10 @@ export default function PaymentChannelSettings({ channels, busy, save }: { chann
   return <section className="wp-section"><h2>ช่องทางรับเงินที่แสดงให้ลูกค้า</h2><p>เปิดบัญชีธนาคาร พร้อมเพย์ หรือทั้งสองช่องทางได้ พร้อมเพย์เป็นคนละบัญชีรับเงินได้ การเปลี่ยนนี้ใช้กับการจองใหม่ รายการเดิมเก็บช่องทาง ณ ตอนจอง</p>
     <form className="wp-form" onSubmit={e => void submit(e)}>
       <fieldset className="wp-payment-channel"><legend><Building2 size={18} /> บัญชีธนาคาร</legend><label className="wp-check"><input type="checkbox" checked={bank.enabled} onChange={e => setBank({ ...bank, enabled: e.target.checked })} />เปิดแสดงบัญชีธนาคาร</label>
-        <label>ธนาคาร<input required={bank.enabled || Boolean(bank.accountNumber)} value={bank.bankName} onChange={e => setBank({ ...bank, bankName: e.target.value })} maxLength={120} placeholder="เช่น กรุงศรี" /></label>
+        <label>ธนาคาร<input required={bank.enabled || Boolean(bank.accountNumber)} value={bank.bankName} onChange={e => setBank({ ...bank, bankName: e.target.value, bankQrPayload: undefined })} maxLength={120} placeholder="เช่น กรุงศรี" /></label>
         <label>ชื่อบัญชีธนาคาร<input required={bank.enabled || Boolean(bank.accountNumber)} value={bank.accountName} onChange={e => setBank({ ...bank, accountName: e.target.value })} maxLength={120} /></label>
-        <label>เลขบัญชีธนาคาร<input required={bank.enabled || Boolean(bank.accountName)} value={bank.accountNumber} onChange={e => setBank({ ...bank, accountNumber: e.target.value })} inputMode="numeric" pattern="[0-9 -]{10,20}" maxLength={20} /></label>
+        <label>เลขบัญชีธนาคาร<input required={bank.enabled || Boolean(bank.accountName)} value={bank.accountNumber} onChange={e => setBank({ ...bank, accountNumber: e.target.value, bankQrPayload: undefined })} inputMode="numeric" pattern="[0-9 -]{10,20}" maxLength={20} /></label>
+        <BankQrInput value={bank.bankQrPayload} change={bankQrPayload => setBank(current => ({ ...current, bankQrPayload }))} busyChanged={setReadingQr} />
       </fieldset>
       <fieldset className="wp-payment-channel"><legend><Smartphone size={18} /> พร้อมเพย์ด้วยเบอร์โทร</legend><label className="wp-check"><input type="checkbox" checked={phone.enabled} onChange={e => setPhone({ ...phone, enabled: e.target.checked })} />เปิดแสดงพร้อมเพย์และ QR ตามยอดจอง</label>
         <label>ชื่อผู้รับพร้อมเพย์<input required={phone.enabled || Boolean(phone.accountNumber)} value={phone.accountName} onChange={e => setPhone({ ...phone, accountName: e.target.value })} maxLength={120} /></label>
@@ -30,6 +33,6 @@ export default function PaymentChannelSettings({ channels, busy, save }: { chann
       </fieldset>
       {!bank.enabled && !phone.enabled && <p className="wp-alert" role="alert">ปิดทั้งสองช่องทางแล้ว การจองใหม่จะยังรับไม่ได้จนเปิดอย่างน้อยหนึ่งช่องทาง รายการเดิมยังส่งสลิปได้</p>}
       <p className="wp-note"><ShieldCheck size={16} /> ต้องผูกผู้รับของทั้งสองช่องทางใน SlipOK สาขาเดียวกันให้เรียบร้อย การบันทึกในแอปไม่ได้เพิ่มบัญชีให้ SlipOK อัตโนมัติ</p>
-      <button type="submit" className="wp-primary" disabled={busy}>{busy ? 'กำลังบันทึก…' : 'บันทึกช่องทางรับเงิน'}</button>
+      <button type="submit" className="wp-primary" disabled={busy || readingQr}>{readingQr ? 'กำลังอ่าน QR…' : busy ? 'กำลังบันทึก…' : 'บันทึกช่องทางรับเงิน'}</button>
     </form></section>;
 }

@@ -360,3 +360,5 @@ html[data-player-theme="dark"], html[data-player-theme="dark"] body { background
 .pa-payment-qr { display: grid; justify-items: center; gap: 10px; padding: 16px; border: 1px solid var(--pa-line); border-radius: 16px; background: var(--pa-paper); color: var(--pa-text); }
 .pa-payment-qr img { display: block; max-width: 100%; height: auto; background: white; border-radius: 8px; }
 .pa-payment-qr a { padding: 12px; color: var(--pa-accent); font-size: 12px; text-align: center; text-decoration: underline; min-height: 44px; }
+.pa-payment-qr button { width: 100%; min-height: 48px; border-radius: 12px; }
+.pa-payment-qr p { font-size: 12px; line-height: 1.7; margin: 0; text-align: center; }

@@ -1,4 +1,5 @@
 import type { TransferAccount } from './marketplaceTypes';
+import { staticBankQr } from './bankQr';
 
 export type PaymentChannel = TransferAccount & { id: 'bank' | 'promptpay'; kind: 'bank' | 'promptpay'; enabled: boolean };
 export type TransferSettings = Partial<TransferAccount> & { channels?: PaymentChannel[] };
@@ -16,6 +17,8 @@ export function parsePaymentChannels(value: unknown): PaymentChannel[] | null {
     if (!['bank', 'promptpay'].includes(String(v.kind)) || v.id !== v.kind || typeof v.enabled !== 'boolean' || result.some(c => c.id === v.id) || !text(v.accountName) || typeof v.accountNumber !== 'string') return null;
     const number = mobileNumber(v.accountNumber), kind = v.kind as PaymentChannel['kind'];
     if (kind === 'bank' ? !/^\d{10,15}$/.test(number) || !text(v.bankName) : !validMobile(number)) return null;
+    const qr = v.bankQrPayload === undefined ? undefined : kind === 'bank' ? staticBankQr(v.bankQrPayload) : null;
+    if (qr === null) return null;
     let linkedBank: TransferAccount['linkedBank'];
     if (v.linkedBank !== undefined) {
       if (kind !== 'promptpay' || !v.linkedBank || typeof v.linkedBank !== 'object') return null;
@@ -23,7 +26,7 @@ export function parsePaymentChannels(value: unknown): PaymentChannel[] | null {
       if (!text(linked.bankName) || typeof linked.accountNumber !== 'string' || !/^\d{10,15}$/.test(mobileNumber(linked.accountNumber))) return null;
       linkedBank = { bankName: linked.bankName.trim(), accountNumber: mobileNumber(linked.accountNumber) };
     }
-    result.push({ id: kind, kind, enabled: v.enabled, bankName: kind === 'promptpay' ? 'พร้อมเพย์' : String(v.bankName).trim(), accountName: v.accountName.trim(), accountNumber: number, ...(linkedBank ? { linkedBank } : {}) });
+    result.push({ id: kind, kind, enabled: v.enabled, bankName: kind === 'promptpay' ? 'พร้อมเพย์' : String(v.bankName).trim(), accountName: v.accountName.trim(), accountNumber: number, ...(qr ? { bankQrPayload: qr } : {}), ...(linkedBank ? { linkedBank } : {}) });
   }
   return result;
 }

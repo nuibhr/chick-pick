@@ -6,7 +6,7 @@ The Cloudflare + TiDB app uses LINE owner/staff authentication, real Open Play a
 
 See [README-SLIPOK.md](README-SLIPOK.md) for the active payment setup and limitations, [README-STRIPE.md](README-STRIPE.md) for legacy Stripe records, and [LAUNCH-REVIEW-2026-10-08.md](LAUNCH-REVIEW-2026-10-08.md) for current deployment and live interaction evidence.
 
-Owner-configurable bank and phone PromptPay channels now support separate recipients, independent visibility, booking-time snapshots, copy actions and locally generated amount-prefilled QR images. Verified SlipOK results supply approval amounts and references on the server; manual funds confirmation remains required. See [PAYMENT-CHANNELS-2026-10-08.md](PAYMENT-CHANNELS-2026-10-08.md) for setup, 77-test validation and deployment evidence. The second recipient still needs the owner's real details and SlipOK account configuration.
+Owner-configurable bank and phone PromptPay channels support separate recipients, independent visibility, booking-time snapshots, copy actions and locally generated amount-prefilled PromptPay QR images. Owners can also upload a static receiving QR issued by their bank. Verified SlipOK results appear as a summary for funds confirmation; reference and amount entry is confined to legacy manual review. QR export supports native file sharing and a five-minute QR-only HTTPS page for Safari. See [PAYMENT-CHANNELS-2026-10-08.md](PAYMENT-CHANNELS-2026-10-08.md) for channel setup and [PAYMENT-EXPERIENCE-2026-10-08.md](PAYMENT-EXPERIENCE-2026-10-08.md) for the latest 83-test validation and mobile limitations.
 
 ## Run locally
 

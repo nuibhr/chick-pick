@@ -59,7 +59,7 @@ test('verified receipt approval derives money and reference from the server resu
   assert.throws(() => recordVerifiedTransfer(receipt, 19000, { transferReference: 'OVERRIDE0001' }, [receipt]));
   assert.throws(() => recordVerifiedTransfer({ ...receipt, id: 'two' }, 19000, {}, [receipt, { ...receipt, id: 'two' }]));
   const markup = renderToStaticMarkup(createElement(ReceiptReview, { booking: { id: 'booking', playerName: 'Fixture', title: 'Game', amount: 19000, transferAccount: phone }, receipt, busy: false, mutate: async () => true }));
-  assert.match(markup, /ระบบเติมยอดและเลขอ้างอิงจาก SlipOK ให้แล้ว/); assert.match(markup, /readOnly=""/); assert.match(markup, /CHANNELTEST0001/); assert.match(markup, /190\.00/);
+  assert.match(markup, /ระบบเติมยอดและเลขอ้างอิงจาก SlipOK ให้แล้ว/); assert.doesNotMatch(markup, /<input[^>]*value="CHANNELTEST0001"/); assert.match(markup, /CHANNELTEST0001/); assert.match(markup, /190\.00/);
   const player = renderToStaticMarkup(createElement(PlayerTransferInstructions, { account: phone, amount: 19000, slipok: true, pending: false }));
   assert.match(player, /คัดลอกเบอร์พร้อมเพย์|สแกนพร้อมเพย์ตามยอดจอง/);
   const pending = renderToStaticMarkup(createElement(PlayerTransferInstructions, { account: phone, amount: 19000, slipok: true, pending: true }));

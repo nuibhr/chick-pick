@@ -1,5 +1,11 @@
 import type { SlipVerification } from '../cloudflare/slipok';
-export default function SlipVerificationStatus({ verification, receiptStatus = 'pending' }: { verification?: SlipVerification; receiptStatus?: 'pending' | 'approved' | 'rejected' }) {
+export default function SlipVerificationStatus({ verification, receiptStatus = 'pending', details = true }: { verification?: SlipVerification; receiptStatus?: 'pending' | 'approved' | 'rejected'; details?: boolean }) {
   if (!verification) return null;
-  return <div className="pa-slip-note" role={verification.status === 'verified' && receiptStatus !== 'rejected' ? 'status' : 'alert'}><b>ผลตรวจ SlipOK</b><p>{receiptStatus === 'approved' ? 'แอดมินตรวจรับเงินเรียบร้อยแล้ว' : receiptStatus === 'rejected' ? 'ผู้จัดขอให้ส่งสลิปใหม่ กรุณาดูเหตุผลด้านล่าง' : verification.message}</p>{verification.amountSatang !== undefined && <span>ยอดที่ตรวจ ฿{(verification.amountSatang / 100).toFixed(2)} · </span>}{verification.paymentChannelLabel && <p>ช่องทางที่ตรวจผ่าน: {verification.paymentChannelLabel}</p>}{verification.reference && <span>เลขรายการ {verification.reference}</span>}{receiptStatus === 'pending' && verification.retryAt && <p>ผู้จัดตรวจใหม่ได้หลัง {new Date(verification.retryAt).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' })} ภาพยังอยู่ในระบบ ไม่ต้องโอนซ้ำ</p>}{receiptStatus === 'pending' && verification.status === 'verified' && <p>รอแอดมินอนุมัติเงิน การผ่าน SlipOK ยังไม่ถือว่าได้เข้าสนาม</p>}{receiptStatus === 'pending' && verification.status === 'rejected' && <p>ผู้จัดจะตรวจเหตุผลก่อนแจ้งให้ส่งใหม่ กรุณาอย่าโอนซ้ำ</p>}</div>;
+  return <div className="pa-slip-note" role={verification.status === 'verified' && receiptStatus !== 'rejected' ? 'status' : 'alert'}>
+    <b>ผลตรวจ SlipOK</b><p>{receiptStatus === 'approved' ? 'แอดมินตรวจรับเงินเรียบร้อยแล้ว' : receiptStatus === 'rejected' ? 'ผู้จัดขอให้ส่งสลิปใหม่ กรุณาดูเหตุผลด้านล่าง' : verification.message}</p>
+    {details && <>{verification.amountSatang !== undefined && <span>ยอดที่ตรวจ ฿{(verification.amountSatang / 100).toFixed(2)} · </span>}{verification.paymentChannelLabel && <p>ช่องทางที่ตรวจผ่าน: {verification.paymentChannelLabel}</p>}{verification.reference && <span>เลขรายการ {verification.reference}</span>}</>}
+    {receiptStatus === 'pending' && verification.retryAt && <p>ผู้จัดตรวจใหม่ได้หลัง {new Date(verification.retryAt).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' })} ภาพยังอยู่ในระบบ ไม่ต้องโอนซ้ำ</p>}
+    {receiptStatus === 'pending' && verification.status === 'verified' && <p>รอแอดมินอนุมัติเงิน การผ่าน SlipOK ยังไม่ถือว่าได้เข้าสนาม</p>}
+    {receiptStatus === 'pending' && verification.status === 'rejected' && <p>ผู้จัดจะตรวจเหตุผลก่อนแจ้งให้ส่งใหม่ กรุณาอย่าโอนซ้ำ</p>}
+  </div>;
 }

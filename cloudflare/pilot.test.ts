@@ -10,7 +10,37 @@ import { prepareCheckout, attachCheckout, applyStripeSession } from './stripePay
 import { cancel } from './pilotDomain';
 import { lessonHoldExpired } from '../src/coachingTypes';
 import { activeTransferAccount, type TransferSettings } from '../src/paymentChannels';
+import { createQrTicket } from './paymentQr';
 const stripeAudit = { actorId: 'test', actorType: 'admin' as const, action: 'test.stripe', entityId: 'fixture' };
+
+test('external QR download only serves an owned unpaid booking snapshot and stops after a pending receipt, cancellation or expiry', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  await f.request('/api/marketplace/setup/transfer-channels', { channels: [{ id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'Phone fixture', accountNumber: '0812345678' }] }, owner);
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
+  const payload = { kind: 'game', id, channel: 'promptpay' };
+  assert.equal((await f.request('/api/player/payments/qr', payload)).status, 401);
+  assert.equal((await f.request('/api/player/payments/qr', payload, f.player('b'))).status, 404);
+  assert.equal((await f.request('/api/player/payments/qr', { ...payload, channel: 'bank' }, f.player('a'))).status, 404);
+  const result = await (await f.request('/api/player/payments/qr', payload, f.player('a'))).json();
+  const viewPath = new URL(result.url).pathname + new URL(result.url).search;
+  const page = await f.request(viewPath); assert.equal(page.status, 200); assert.match(page.headers.get('content-security-policy')!, /frame-ancestors 'none'/);
+  assert.match(await page.text(), /190\.00/);
+  const imagePath = viewPath.replace('/view?', '/image?');
+  const image = await f.request(imagePath + '&download=1'); assert.equal(image.status, 200); assert.equal(image.headers.get('content-type'), 'image/png'); assert.match(image.headers.get('content-disposition')!, /attachment/);
+  assert.deepEqual([...new Uint8Array(await image.arrayBuffer()).slice(0,8)], [137,80,78,71,13,10,26,10]);
+  assert.equal((await f.request('/api/player/payments/qr/image?ticket=invalid')).status, 410);
+  const expired = await createQrTicket(f.env.ADMIN_SESSION_SECRET!, { ...payload, kind: 'game' }, Date.now() - 301000);
+  assert.equal((await f.request('/api/player/payments/qr/image?ticket=' + expired)).status, 410);
+  // Disabling current settings must not change the signed booking snapshot.
+  await f.request('/api/marketplace/setup/transfer-channels', { channels: [] }, owner);
+  assert.equal((await f.request(imagePath)).status, 200);
+  const row = f.data.bookings.find(b => b.id === id)!;
+  row.receipts = [{ id: 'receipt', status: 'pending' } as any];
+  assert.equal((await f.request(imagePath)).status, 409);
+  row.receipts = []; row.paidAt = new Date().toISOString(); assert.equal((await f.request(imagePath)).status, 409);
+  row.paidAt = undefined; row.cancelledAt = new Date().toISOString(); assert.equal((await f.request(imagePath)).status, 409);
+});
 
 function slipOKPayload(amount = 190, reference = 'SLIPOKTEST0001') {
   const now = new Date();
