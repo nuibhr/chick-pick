@@ -1,7 +1,7 @@
 import type { ReceiptSubmission } from '../src/marketplaceTypes';
 import { TidbDocuments, type Audit } from './tidbDocuments';
 import { adminCookie, authenticateAdmin, clearAdminCookie, digest, limitAuth, organizerKey, type Organizer } from './pilotAuth';
-import { admit, book, cancel, fail, newSession, PilotError, receiptEligibility, review, submitReceipt, transferAccount, unavailableOcr, type Actor } from './pilotDomain';
+import { admit, book, cancel, fail, PilotError, receiptEligibility, review, submitReceipt, transferAccount, unavailableOcr, type Actor } from './pilotDomain';
 import { configure, createEntry, csv, report, revenueReport, settle, updateEntry } from './financeDomain';
 import { authorize, changeMember, claim, emptyTeam, invite, publicTeam, teamKey, type Team, type Member } from './adminTeam';
 import { bookLesson, cancelLesson, changeCoachSlot, coachAdmin, coachCatalog, completeLesson, createCoachSlot, lessonReceiptEligibility, lessonView, reviewLessonReceipt, saveCoach, submitLessonReceipt } from './coachingDomain';
@@ -18,6 +18,7 @@ import { createQrTicket, readQrTicket, paymentQrPayload, paymentQrPng, paymentQr
 import { paymentQrPhone } from '../src/paymentChannels';
 import { stripeLocksPayment } from '../src/paymentTypes';
 import { expiredHoldMessage, paymentHoldExpired } from '../src/bookingHold';
+import { catalogManagement, deleteCatalogEntry, pauseSession, saveSession, type CatalogKind } from './catalogManagement';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
 export type PilotEnv = StripeEnv & SlipOkEnv & { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
@@ -212,10 +213,23 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       if (request.method !== 'GET') fail(405, 'ใช้ GET');
       return json(await checkSlipOkConnection(env));
     }
-    if (path === '/api/marketplace/venues' && request.method === 'GET') return json({ venues: await db.readDocument<Venue[]>('court-venues', []) });
+    const deletion = path.match(/^\/api\/(marketplace\/(venues|sessions)|coaching\/(coaches|slots))\/([^/]+)\/delete$/);
+    if (deletion && request.method === 'POST') {
+      await body(request);
+      const kind = ({ venues: 'venue', sessions: 'game', coaches: 'coach', slots: 'slot' } as const)[(deletion[2] || deletion[3]) as 'venues' | 'sessions' | 'coaches' | 'slots'];
+      return json(await db.updateFinance(d => deleteCatalogEntry(d, kind as CatalogKind, deletion[4]), { ...audit(owner, `${kind}.deleted`, deletion[4], true), entityType: kind }));
+    }
+    if (path === '/api/marketplace/venues' && request.method === 'GET') {
+      const docs = await db.readFinance();
+      return json({ venues: (docs['court-venues'] || []).map(v => ({ ...v, management: catalogManagement(docs, 'venue', v.id) })) });
+    }
     if (/^\/api\/marketplace\/venues(?:\/[^/]+)?$/.test(path) && request.method === 'POST') {
       const v = await body(request), id = path.split('/')[4];
-      return json(await db.updateDocument<Venue[], Venue>('court-venues', [], rows => saveVenue(rows, v, id), audit(owner, 'venue.updated', id || 'new', true)), id ? 200 : 201);
+      return json(await db.updateFinance(d => {
+        const existing = d['court-venues']?.find(row => row.id === id);
+        if (existing && typeof v.name === 'string' && v.name.trim() !== existing.name && !catalogManagement(d, 'venue', existing.id).canDelete) fail(409, 'สนามนี้ถูกใช้งานแล้ว เก็บชื่อเดิมเพื่อรักษาการเชื่อมกับก๊วน โค้ช และประวัติ แก้ที่อยู่หรือซ่อนได้');
+        return saveVenue(d['court-venues'] ||= [], v, id);
+      }, audit(owner, 'venue.updated', id || 'new', true)), id ? 200 : 201);
     }
     if (path === '/api/coaching' && request.method === 'GET') return json(coachAdmin(await db.readFinance()));
     if (path.startsWith('/api/coaching/')) {
@@ -265,7 +279,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     }
     if (path === '/api/marketplace' || path === '/api/marketplace/') {
       if (request.method !== 'GET') fail(405, 'ใช้ GET');
-      const data = await db.readMarketplace(); return json({ ...data, demo: false, pilot: true });
+      const docs = await db.readFinance(); return json({ ...docs.marketplace, sessions: docs.marketplace.sessions.map(s => ({ ...s, management: catalogManagement(docs, 'game', s.id) })), demo: false, pilot: true });
     }
     if (path === '/api/marketplace/setup') {
       if (request.method !== 'GET') fail(405, 'ใช้ GET');
@@ -299,11 +313,13 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       await db.updateDocument('worker-pilot', { bookingEnabled: false }, saved => { saved.bookingEnabled = v.bookingEnabled as boolean; }, audit(owner, 'pilot.updated', 'worker-pilot', true)); return json({ bookingEnabled: v.bookingEnabled });
     }
     if (path === '/api/marketplace/sessions' && request.method === 'POST') {
-      const v = await body(request), venues = await db.readDocument<Venue[]>('court-venues', []);
-      const venue = venues.find(row => row.active && (v.venueId ? row.id === v.venueId : row.name === v.venue));
-      if (!venue) fail(400, 'เลือกสนามที่เปิดแสดงจากทะเบียนสนามก่อน');
-      if (typeof v.endsAt !== 'string') fail(400, 'ระบุเวลาจบก๊วน');
-      const session = newSession({ ...v, venueId: venue.id, venue: venue.name, area: venue.area }); await db.updateMarketplace(data => { data.sessions.unshift(session); }, audit(owner, 'session.created', session.id, true)); return json(session, 201);
+      const v = await body(request);
+      return json(await db.updateFinance(d => saveSession(d, v), audit(owner, 'session.created', 'new', true)), 201);
+    }
+    const sessionAction = path.match(/^\/api\/marketplace\/sessions\/([^/]+)\/(edit|pause)$/);
+    if (sessionAction && request.method === 'POST') {
+      const v = await body(request), [, id, action] = sessionAction;
+      return json(await db.updateFinance(d => action === 'edit' ? saveSession(d, v, id) : pauseSession(d, id, v.paused), audit(owner, `session.${action}`, id, true)));
     }
     const receiptRoute = path.match(/^\/api\/marketplace\/bookings\/([^/]+)\/receipts\/([^/]+)(\/review)?$/);
     if (receiptRoute) {

@@ -9,6 +9,7 @@ import { TidbDocuments } from './tidbDocuments';
 import { ownProfile, profileSettings, updateProfile } from '../server/playerProfiles';
 import { pilotRequest, type ReceiptKV } from './pilot';
 import { publicTransferAccount } from '../src/paymentChannels';
+import { privateAssetPath, secureResponse } from './securityHeaders';
 
 type Env = StripeEnv & SlipOkEnv & {
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -73,7 +74,7 @@ async function playerIdentity(request: Request, channelId: string | undefined): 
   catch { return json({ message: 'ยืนยันตัวตน LINE ไม่สำเร็จ กรุณาเปิดแอปใหม่' }, 401); }
 }
 
-export function publicSession(session: Session, bookings: Booking[], profiles: MemberProfile[] = []) {
+export function publicSession(session: Session, bookings: Booking[], profiles: MemberProfile[] = [], venues?: import('../src/venueTypes').Venue[]) {
   const active = bookings.filter(booking => booking.sessionId === session.id && activeBooking(booking));
   const startsAt = Date.parse(session.startsAt);
   const upcoming = session.status !== 'completed' && Number.isFinite(startsAt) && startsAt > Date.now();
@@ -91,19 +92,18 @@ export function publicSession(session: Session, bookings: Booking[], profiles: M
       new Date(startsAt).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', timeZone: 'Asia/Bangkok' }),
     time: session.time, price: session.price, joined: active.length, capacity: session.capacity,
     dupr: session.dupr, vibe: session.vibe, host: session.host, courtCount: session.courtCount,
-    tags: session.tags, startsAt: session.startsAt, status, participants,
+    tags: session.tags, startsAt: session.startsAt, status, participants, bookingPaused: Boolean(session.bookingPaused) || !!venues && !venues.some(v => v.active && (session.venueId ? v.id === session.venueId : v.name === session.venue)),
     privateParticipantCount: admitted.length - participants.length,
   };
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+async function handleRequest(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
     // A private document was accidentally placed in public/brand; never serve it.
-    if (pathname === '/brand/messageImage_1790922360771.jpg') return new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
+    if (privateAssetPath(pathname)) return new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
     if (!pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     if (pathname === '/api/player/me/profile' && request.method === 'POST') {
-      if (request.headers.has('Origin') && request.headers.get('Origin') !== new URL(request.url).origin) return json({ message: 'กรุณาบันทึกจากหน้าแอปโดยตรง' }, 403);
+      if (request.headers.get('Sec-Fetch-Site') === 'cross-site' || request.headers.has('Origin') && request.headers.get('Origin') !== new URL(request.url).origin) return json({ message: 'กรุณาบันทึกจากหน้าแอปโดยตรง' }, 403);
       const identity = await playerIdentity(request, env.LINE_CHANNEL_ID);
       if (identity instanceof Response) return identity;
       if (!env.TIDB_DATABASE_URL) return json({ message: 'ระบบบันทึกโปรไฟล์ยังไม่พร้อม' }, 503);
@@ -175,12 +175,18 @@ export default {
           const coaching = (await new TidbDocuments(env.TIDB_DATABASE_URL).readDocument<import('../src/coachingTypes').Enrollment[]>('coaching', [])).filter(e => e.playerId === `line:${identity.sub}`).map(lessonView);
           return json({ bookings: [...bookings.map(b => ({ ...b, kind: 'game' })), ...coaching], serverNow: Date.now() });
         }
-        return json({ sessions: data.sessions.map(session => publicSession(session, data.bookings, data.profiles)) });
+        const venues = await new TidbDocuments(env.TIDB_DATABASE_URL).readDocument<import('../src/venueTypes').Venue[]>('court-venues', []);
+        return json({ sessions: data.sessions.map(session => publicSession(session, data.bookings, data.profiles, venues)) });
       } catch (error) {
         console.error('TiDB read failed', error instanceof Error ? error.name : 'unknown');
         return json({ message: 'อ่านข้อมูลก๊วนจาก TiDB ไม่สำเร็จ กรุณาลองใหม่ภายหลัง' }, 503);
       }
     }
     return json({ message: 'API นี้ยังไม่เปิดบน Workers preview' }, 503);
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    return secureResponse(await handleRequest(request, env));
   },
 };

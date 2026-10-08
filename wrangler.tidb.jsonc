@@ -17,6 +17,6 @@
     "directory": "./dist-client",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/brand/messageImage_1790922360771.jpg"]
+    "run_worker_first": ["/api/*", "/brand/messageImage_1790922360771.jpg", "/.*", "/data/*", "/artifacts/*", "/server/*", "/cloudflare/*", "/scripts/*", "/src/*", "/node_modules/*", "/package*", "/tsconfig*", "/wrangler*"]
   }
 }

@@ -3,6 +3,33 @@ import { test } from 'node:test';
 import worker, { publicSession, verifyLineIdToken } from './tidbPreview';
 import type { Booking, MemberProfile, Session } from '../src/marketplaceTypes';
 import { TidbDocuments } from './tidbDocuments';
+import { secureResponse } from './securityHeaders';
+
+test('Worker blocks source/env paths, protects asset/API headers and keeps receipt CSP stronger', async () => {
+  const env = { ASSETS: { fetch: async () => new Response('<html>app</html>', { headers: { 'Content-Type': 'text/html' } }) } };
+  for (const path of ['/.env', '/.env.local', '/.git/config', '/data/private.json', '/artifacts/private-config/key.txt', '/server/auth.ts', '/src/main.tsx', '/package.json', '/wrangler.tidb.jsonc', '/%2eenv']) {
+    const response = await worker.fetch(new Request('https://example.com' + path), env);
+    assert.equal(response.status, 404, path); assert.equal(response.headers.get('cache-control'), 'no-store');
+  }
+  const app = await worker.fetch(new Request('https://example.com/miniapp'), env);
+  assert.equal(app.status, 200); assert.equal(app.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(app.headers.get('referrer-policy'), 'no-referrer'); assert.equal(app.headers.get('x-frame-options'), 'DENY');
+  assert.match(app.headers.get('content-security-policy')!, /frame-ancestors 'none'/);
+  assert.match(app.headers.get('permissions-policy')!, /camera=\(self\)/);
+  const privateApi = await worker.fetch(new Request('https://example.com/api/marketplace'), env);
+  assert.equal(privateApi.status, 503); assert.equal(privateApi.headers.get('referrer-policy'), 'no-referrer');
+  const receipt = secureResponse(new Response('image', { headers: { 'Content-Security-Policy': "default-src 'none'; sandbox" } }));
+  assert.equal(receipt.headers.get('content-security-policy'), "default-src 'none'; sandbox");
+});
+
+test('public session API follows current venue visibility and never exposes admin delete policy', async t => {
+  const session = { id: 'game', title: 'Game', venue: 'Court', venueId: 'court', area: 'Test', date: '', time: '', price: 190, joined: 0, capacity: 4, dupr: '<3.5', vibe: 'social', host: 'Test', hostRating: 0, courtCount: 1, venueCost: 900, tags: [], startsAt: new Date(Date.now() + 86400000).toISOString(), status: 'open', management: { canDelete: true } };
+  t.mock.method(TidbDocuments.prototype, 'readMarketplace', async () => ({ sessions: [session], bookings: [] }));
+  t.mock.method(TidbDocuments.prototype, 'readDocument', async () => [{ id: 'court', name: 'Court', active: false }]);
+  const result = await worker.fetch(new Request('https://example.com/api/player/sessions'), { TIDB_DATABASE_URL: 'mysql://fixture:fixture@gateway01.ap-southeast-1.prod.aws.tidbcloud.com/test', ASSETS: { fetch: async () => new Response('unused') } });
+  const data = await result.json(); assert.equal(result.status, 200); assert.equal(data.sessions[0].bookingPaused, true);
+  assert.equal(data.sessions[0].management, undefined); assert.equal(data.sessions[0].venueCost, undefined);
+});
 
 test('own tickets expose server deadline and expiry without cancelling protected or old bookings', async t => {
   const now = Date.now(), base: Booking = { id: 'expired', sessionId: 'game', playerId: 'line:user-1', playerName: 'Member', amount: 19000, title: 'Open Play', createdAt: new Date(now - 300001).toISOString(), holdExpiresAt: new Date(now - 1).toISOString() };

@@ -18,6 +18,129 @@ import { activeBooking } from '../src/marketplaceTypes';
 import { publicSession } from './tidbPreview';
 const stripeAudit = { actorId: 'test', actorType: 'admin' as const, action: 'test.stripe', entityId: 'fixture' };
 
+test('catalog mutations require operations, reject forged/cross-site requests and never mutate on GET', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  for (const role of ['viewer', 'finance', 'operator']) {
+    const invitation = await (await f.request('/api/finance/admin-team', { action: 'invite', role }, owner)).json();
+    const signed = await f.request('/api/finance/auth', { idToken: 'test-line-token-' + role, pairingToken: invitation.code });
+    const staff = { Cookie: signed.headers.get('set-cookie')!.split(';')[0] };
+    for (const path of ['/api/marketplace/sessions/game/pause', '/api/marketplace/sessions/game/delete', '/api/coaching/slots/unknown/delete']) {
+      if (role !== 'operator') assert.equal((await f.request(path, { paused: true }, staff)).status, 403);
+    }
+    if (role === 'operator') {
+      assert.equal((await f.request('/api/marketplace/sessions/game/pause', { paused: true }, staff)).status, 200);
+      assert.equal((await f.request('/api/marketplace/sessions/game/pause', { paused: 'false' }, staff)).status, 400);
+      assert.equal((await f.request('/api/marketplace/sessions/game/pause', undefined, staff)).status, 403);
+      assert.equal((await f.request('/api/marketplace/sessions/game/delete', {}, { ...staff, Origin: 'https://evil.example' })).status, 403);
+      assert.equal((await f.request('/api/marketplace/sessions/game/delete', {}, { ...staff, 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+      assert.equal((await f.request('/api/marketplace/sessions/game/delete', undefined, staff)).status, 403);
+      assert.equal((await f.request('/api/marketplace/sessions/game/delete', {}, { Cookie: staff.Cookie + 'tamper' })).status, 401);
+      assert.equal((await f.request('/api/marketplace/sessions/game/delete', {}, staff)).status, 200);
+    }
+  }
+  assert.equal((await f.request('/api/marketplace/sessions/unknown/delete', {})).status, 401);
+  assert.equal((await f.request('/api/marketplace/sessions/unknown/delete', {}, f.player('a'))).status, 401);
+  assert.equal((await f.request('/api/marketplace/sessions/unknown/delete', {}, owner)).status, 404);
+});
+
+test('cancelled, expired, paid and receipt history plus ledger references always prevent deletion and time/price edits', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  const original = structuredClone(f.data.sessions[0]); f.data.sessions = [];
+  const base = { playerId: 'line:player-a', playerName: 'a', title: original.title, amount: 19000, createdAt: new Date().toISOString() };
+  for (const [id, extra] of Object.entries({ cancelled: { cancelledAt: new Date().toISOString() }, expired: { holdExpiresAt: new Date(Date.now() - 1).toISOString() }, paid: { paidAt: new Date().toISOString() }, pending: { receipts: [{ id: 'private-slip', status: 'pending' }] } })) {
+    f.data.sessions.push({ ...original, id }); f.data.bookings.push({ ...base, id: 'booking-' + id, sessionId: id, ...extra } as any);
+    assert.equal((await f.request(`/api/marketplace/sessions/${id}/delete`, {}, owner)).status, 409);
+    assert.equal((await f.request(`/api/marketplace/sessions/${id}/edit`, { price: 1 }, owner)).status, 409);
+  }
+  f.data.sessions.push({ ...original, id: 'ledger' }); f.docs.set('finance', [{ allocationKey: 'game:ledger', reference: '', source: 'manual' }]);
+  assert.equal((await f.request('/api/marketplace/sessions/ledger/delete', {}, owner)).status, 409);
+  f.data.sessions.push({ ...original, id: 'closed' }); f.docs.set('revenue-settlements', [{ key: 'game:closed' }]);
+  assert.equal((await f.request('/api/marketplace/sessions/closed/delete', {}, owner)).status, 409);
+  const result = await (await f.request('/api/marketplace', undefined, owner)).json();
+  assert.equal(result.sessions.length, 6); assert.ok(result.sessions.every((s: any) => !s.management.canDelete && s.management.deleteReason));
+  assert.equal(f.data.bookings.length, 4);
+});
+
+test('unused games can be edited, pause/hidden venue blocks new buyers and preserves existing reservations', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  f.docs.set('worker-pilot', { bookingEnabled: true }); f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
+  const start = new Date(Date.now() + 86400000), end = new Date(start.getTime() + 3600000);
+  const values = { title: 'Updated game', host: 'Test', venueId: 'fixture-venue-0', startsAt: start.toISOString(), endsAt: end.toISOString(), time: 'wrong', price: 220, capacity: 8, courtCount: 2, style: 'high' };
+  assert.equal((await f.request('/api/marketplace/sessions/game/edit', values, owner)).status, 200);
+  assert.equal(f.data.sessions[0].id, 'game'); assert.equal(f.data.sessions[0].price, 220); assert.equal(f.data.sessions[0].dupr, '3.5+');
+  const first = await f.request('/api/player/bookings', { sessionId: 'game', amount: 1 }, f.player('a')); assert.equal(first.status, 201);
+  assert.equal(f.data.bookings[0].amount, 22000);
+  assert.equal((await f.request('/api/marketplace/sessions/game/edit', { ...values, price: 1 }, owner)).status, 409);
+  await f.request('/api/marketplace/sessions/game/pause', { paused: true }, owner);
+  assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('b'))).status, 409);
+  assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).status, 200);
+  await f.request('/api/marketplace/sessions/game/pause', { paused: false }, owner);
+  const venue = (f.docs.get('court-venues') as any[])[0];
+  assert.equal((await f.request('/api/marketplace/venues/' + venue.id, { ...venue, name: 'Renamed' }, owner)).status, 409);
+  assert.equal((await f.request('/api/marketplace/venues/' + venue.id + '/delete', {}, owner)).status, 409);
+  assert.equal((await f.request('/api/marketplace/venues/' + venue.id, { ...venue, active: false }, owner)).status, 200);
+  assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('b'))).status, 409);
+  assert.equal(publicSession(f.data.sessions[0], f.data.bookings, [], f.docs.get('court-venues') as any[]).bookingPaused, true);
+  assert.equal(f.data.bookings.length, 1); assert.equal(f.data.bookings[0].amount, 22000);
+  f.docs.set('court-venues', []);
+  assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('c'))).status, 409);
+});
+
+test('calendar edits derive price, reject overlap and retain cancelled and legacy enrollment history', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  f.docs.set('worker-pilot', { bookingEnabled: true }); f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
+  const coach = await (await f.request('/api/coaching/coaches', { name: 'Fixture', specialty: 'Test', venue: 'Court', hourlyRate: 600, bookingFee: 100, active: true }, owner)).json();
+  const start = Math.ceil((Date.now() + 86400000) / 1800000) * 1800000;
+  const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start: new Date(start).toISOString(), hours: 1, status: 'open' }, owner)).json();
+  const next = await f.request('/api/coaching/slots/' + slot.id, { action: 'edit', start: new Date(start + 7200000).toISOString(), hours: 2, status: 'open', price: 1 }, owner);
+  assert.equal(next.status, 200); assert.equal((await next.json()).price, 1200);
+  assert.equal((await f.request('/api/coaching/slots', { coachId: coach.id, start: new Date(start + 7200000).toISOString(), hours: 1, status: 'open' }, owner)).status, 409);
+  const booked = await (await f.request('/api/player/lessons', { slotId: slot.id }, f.player('a'))).json();
+  assert.equal((await f.request('/api/coaching/slots/' + slot.id + '/delete', {}, owner)).status, 409);
+  await f.request('/api/player/lessons/' + booked.id + '/cancel', {}, f.player('a'));
+  const enrollment = (f.docs.get('coaching') as any[])[0]; delete enrollment.lessons[0].slotId;
+  assert.equal((await f.request('/api/coaching/slots/' + slot.id + '/delete', {}, owner)).status, 409);
+  assert.equal((await f.request('/api/coaching/slots/' + slot.id, { action: 'edit', start: new Date(start).toISOString(), hours: 1, status: 'open' }, owner)).status, 409);
+  assert.equal((await f.request('/api/coaching/coaches/' + coach.id + '/delete', {}, owner)).status, 409);
+  const venue = (f.docs.get('court-venues') as any[]).find(v => v.name === 'Court');
+  await f.request('/api/marketplace/venues/' + venue.id, { ...venue, active: false }, owner);
+  assert.equal((await (await f.request('/api/coach-catalog')).json()).coaches.length, 0);
+  assert.equal((await f.request('/api/player/lessons', { slotId: slot.id }, f.player('b'))).status, 409);
+});
+
+test('booking versus deletion is serialized for games and coach slots, with no dangling reservations', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  f.docs.set('worker-pilot', { bookingEnabled: true }); f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
+  const original = structuredClone(f.data.sessions[0]);
+  for (const order of [false, true]) {
+    const id = 'race-' + order; f.data.sessions.push({ ...original, id });
+    const buy = () => f.request('/api/player/bookings', { sessionId: id }, f.player(String(order)));
+    const remove = () => f.request('/api/marketplace/sessions/' + id + '/delete', {}, owner);
+    const replies = await Promise.all(order ? [buy(), remove()] : [remove(), buy()]);
+    assert.ok(replies.some(r => r.status >= 400));
+    assert.ok(f.data.bookings.every(b => f.data.sessions.some(s => s.id === b.sessionId)));
+  }
+  const coach = await (await f.request('/api/coaching/coaches', { name: 'Fixture', specialty: 'Test', venue: 'Court', hourlyRate: 600, bookingFee: 100, active: true }, owner)).json();
+  const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start: new Date(Math.ceil((Date.now() + 86400000) / 1800000) * 1800000).toISOString(), hours: 1, status: 'open' }, owner)).json();
+  const results = await Promise.all([f.request('/api/player/lessons', { slotId: slot.id }, f.player('slot')), f.request('/api/coaching/slots/' + slot.id + '/delete', {}, owner)]);
+  assert.ok(results.some(r => r.status >= 400));
+  assert.ok((f.docs.get('coaching') as any[]).every(e => e.lessons.every((l: any) => (f.docs.get('coach-slots') as any[]).some(s => s.id === l.slotId))));
+});
+
+test('operations can delete unused venue, game, coach and calendar slot but cannot erase referenced history', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  const venue = await (await f.request('/api/marketplace/venues', { name: 'Empty Court', area: 'Test', address: '', active: true }, owner)).json();
+  assert.equal((await f.request(`/api/marketplace/venues/${venue.id}/delete`, {}, owner)).status, 200);
+  await f.request('/api/marketplace/venues', { name: 'Court', area: 'Test', address: '', active: true }, owner);
+  const coach = await (await f.request('/api/coaching/coaches', { name: 'Fixture', specialty: 'Test', bio: '', venue: 'Court', hourlyRate: 600, bookingFee: 100, active: true }, owner)).json();
+  const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start: new Date(Math.ceil((Date.now() + 86400000) / 1800000) * 1800000).toISOString(), hours: 1, status: 'open' }, owner)).json();
+  assert.equal((await f.request(`/api/coaching/coaches/${coach.id}/delete`, {}, owner)).status, 409);
+  assert.equal((await f.request(`/api/coaching/slots/${slot.id}/delete`, {}, owner)).status, 200);
+  assert.equal((await f.request(`/api/coaching/coaches/${coach.id}/delete`, {}, owner)).status, 200);
+  assert.equal((await f.request('/api/marketplace/sessions/game/delete', {}, owner)).status, 200);
+  assert.equal(f.data.sessions.length, 0);
+});
+
 test('five-minute holds do not extend on retry; expired last seat reopens for exactly one concurrent buyer', async t => {
   const f = fixture(t), owner = await f.signIn();
   f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
@@ -284,6 +407,7 @@ test('same bank transfer with different images is rejected across games and coac
 
 test('opening Open Play requires a registered active venue and a future game', async t => {
   const f = fixture(t), owner = await f.signIn();
+  f.docs.set('court-venues', []);
   f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
   assert.equal((await f.request('/api/marketplace/setup/pilot', { bookingEnabled: true }, owner)).status, 409);
   f.docs.set('court-venues', [{ id: 'court', name: 'สนาม', area: 'ขอนแก่น', address: '', active: true }]);
@@ -392,6 +516,7 @@ test('coaching receipts are private, cannot reuse game slips, require manual app
 
 test('venue editing and coach head fees obey operator permissions on the server', async t => {
   const f=fixture(t), owner=await f.signIn();
+  f.docs.set('court-venues', []);
   const invitation=await(await f.request('/api/finance/admin-team',{action:'invite',role:'operator'},owner)).json();
   const login=await f.request('/api/finance/auth',{idToken:'test-line-token-staff',pairingToken:invitation.code});
   assert.equal(login.status,200);
@@ -401,6 +526,7 @@ test('venue editing and coach head fees obey operator permissions on the server'
   assert.equal((await(await f.request('/api/venues')).json()).venues.length,1);
   await f.request('/api/marketplace/venues/'+venue.id,{...venue,active:false},operator);
   assert.equal((await(await f.request('/api/venues')).json()).venues.length,0);
+  await f.request('/api/marketplace/venues',{name:'Court',area:'Test',address:'',active:true},operator);
   const coach={name:'Test',specialty:'Test',bio:'',venue:'Court',hourlyRate:600,active:true};
   assert.equal((await f.request('/api/coaching/coaches',{...coach,bookingFee:100},operator)).status,403);
   assert.equal((await f.request('/api/coaching/coaches',coach,operator)).status,201);
@@ -429,15 +555,16 @@ test('organizer releases unpaid game reservations, but cannot cancel payments or
 function fixture(t: TestContext) {
   const data: MarketplaceData = { sessions: [{ id:'game',title:'ก๊วนทดสอบ',venue:'สนาม',area:'ขอนแก่น',date:'',time:'18–20',price:190,joined:0,capacity:4,dupr:'<3.5',vibe:'เบา–กลาง',host:'ผู้จัด',hostRating:0,courtCount:1,venueCost:0,tags:[],startsAt:new Date(Date.now()+86400000).toISOString(),status:'open' }], bookings:[] };
   const docs = new Map<string,unknown>(), images = new Map<string,ArrayBuffer>(); let tail = Promise.resolve();
+  docs.set('court-venues', ['สนาม', 'Court', 'Test Court'].map((name, i) => ({ id: 'fixture-venue-' + i, name, area: 'Test', address: '', active: true })));
   const lock = async <T>(fn:()=>T|Promise<T>) => { const previous=tail; let release:()=>void; tail=new Promise<void>(r=>release=r); await previous; try { return await fn(); } finally { release!(); } };
   t.mock.method(TidbDocuments.prototype,'readMarketplace',async()=>structuredClone(data));
   t.mock.method(TidbDocuments.prototype,'readDocument',async(key:string,fallback:unknown)=>structuredClone(docs.get(key)??fallback));
   t.mock.method(TidbDocuments.prototype,'readTransferAccount',async()=>activeTransferAccount(docs.get('transfer-account') as TransferSettings || null));
   t.mock.method(TidbDocuments.prototype,'updateDocument',async(key:string,fallback:unknown,mutate:(v:any)=>unknown)=>lock(async()=>{ const v=structuredClone(docs.get(key)??fallback); const result=await mutate(v); docs.set(key,v); return result; }));
-  t.mock.method(TidbDocuments.prototype,'updateMarketplace',async(mutate:(v:MarketplaceData,ctx:PilotContext)=>unknown)=>lock(async()=>{ const copy=structuredClone(data); const r=await mutate(copy,{account:activeTransferAccount(docs.get('transfer-account') as TransferSettings || null),enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,paymentProvider:(docs.get('worker-pilot') as any)?.paymentProvider || 'manual',closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)}); Object.assign(data,copy); return r; }));
-  const financialSnapshot=()=>({marketplace:structuredClone(data),finance:structuredClone(docs.get('finance')||[]),coaching:structuredClone(docs.get('coaching')||[]),'coach-profiles':structuredClone(docs.get('coach-profiles')||[]),'coach-slots':structuredClone(docs.get('coach-slots')||[]),'revenue-config':structuredClone(docs.get('revenue-config')||[]),'revenue-settlements':structuredClone(docs.get('revenue-settlements')||[])});
+  t.mock.method(TidbDocuments.prototype,'updateMarketplace',async(mutate:(v:MarketplaceData,ctx:PilotContext)=>unknown)=>lock(async()=>{ const copy=structuredClone(data); const r=await mutate(copy,{venues: docs.has('court-venues') ? structuredClone(docs.get('court-venues')) as any : undefined,account:activeTransferAccount(docs.get('transfer-account') as TransferSettings || null),enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,paymentProvider:(docs.get('worker-pilot') as any)?.paymentProvider || 'manual',closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)}); Object.assign(data,copy); return r; }));
+  const financialSnapshot=()=>({marketplace:structuredClone(data),finance:structuredClone(docs.get('finance')||[]),coaching:structuredClone(docs.get('coaching')||[]),'coach-profiles':structuredClone(docs.get('coach-profiles')||[]),'coach-slots':structuredClone(docs.get('coach-slots')||[]),'court-venues': docs.has('court-venues') ? structuredClone(docs.get('court-venues')) : undefined,'revenue-config':structuredClone(docs.get('revenue-config')||[]),'revenue-settlements':structuredClone(docs.get('revenue-settlements')||[])});
   t.mock.method(TidbDocuments.prototype,'readFinance',async()=>financialSnapshot());
-  t.mock.method(TidbDocuments.prototype,'updateFinance',async(mutate:(v:any,ctx:PilotContext)=>unknown)=>lock(async()=>{const v=financialSnapshot();const result=await mutate(v,{account:activeTransferAccount(docs.get('transfer-account') as TransferSettings || null),enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,paymentProvider:(docs.get('worker-pilot') as any)?.paymentProvider || 'manual',closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)});Object.assign(data,v.marketplace);for(const key of ['finance','coaching','coach-profiles','coach-slots','revenue-config','revenue-settlements'])docs.set(key,v[key]);return result;}));
+  t.mock.method(TidbDocuments.prototype,'updateFinance',async(mutate:(v:any,ctx:PilotContext)=>unknown)=>lock(async()=>{const v=financialSnapshot();const result=await mutate(v,{venues: docs.has('court-venues') ? structuredClone(docs.get('court-venues')) as any : undefined,account:activeTransferAccount(docs.get('transfer-account') as TransferSettings || null),enabled:(docs.get('worker-pilot') as any)?.bookingEnabled===true,paymentProvider:(docs.get('worker-pilot') as any)?.paymentProvider || 'manual',closed:(docs.get('revenue-settlements') as any[]||[]).map(r=>r.key)});Object.assign(data,v.marketplace);for(const key of ['finance','coaching','coach-profiles','coach-slots','court-venues','revenue-config','revenue-settlements'])docs.set(key,v[key]);return result;}));
   const env:PilotEnv={TIDB_DATABASE_URL:'mysql://fixture:fixture@gateway01.ap-southeast-1.prod.aws.tidbcloud.com/test',LINE_CHANNEL_ID:'test-channel',VITE_LIFF_ID:'test-liff',ADMIN_SESSION_SECRET:'test-only-secret-for-cookie-signing',ADMIN_PAIRING_TOKEN:'TEST12CODEAB',RECEIPTS:{put:async(k,v)=>{images.set(k,v);},get:async k=>images.get(k)||null,delete:async k=>{images.delete(k);}}};
   const verify=async(token:string)=>{if(!token.startsWith('test-line-token-'))throw Error('invalid'); return {sub:token.slice(16),name:token.slice(16)};};
   const request=async(path:string,body?:unknown,headers:Record<string,string>={},method=body===undefined?'GET':'POST')=>pilotRequest(new Request('https://example.com'+path,{method,headers:{...(body===undefined?{}:{'Content-Type':'application/json'}),...headers},body:body===undefined?undefined:JSON.stringify(body)}),env,verify);

@@ -4,13 +4,14 @@ import { buildRevenueUnits, defaultRevenueConfig } from '../src/revenueMath';
 import type { Coach, CoachSlot, Enrollment } from '../src/coachingTypes';
 import type { MarketplaceData } from '../src/marketplaceTypes';
 import { activeBooking } from '../src/marketplaceTypes';
+import type { Venue } from '../src/venueTypes';
 import type { PlatformAllocation, RevenueConfig, RevenueReport, RevenueUnit } from '../src/revenueTypes';
 import { digest } from './pilotAuth';
 import { fail } from './pilotDomain';
 
 export type Snapshot = NonNullable<RevenueUnit['settlement']> & { key: string; rule: RevenueUnit['rule']; platformAllocation?: PlatformAllocation };
-export type FinanceDocuments = { marketplace: MarketplaceData; finance: FinanceRow[]; coaching: Enrollment[]; 'coach-profiles'?: Coach[]; 'coach-slots'?: CoachSlot[]; 'revenue-config': RevenueConfig[]; 'revenue-settlements': Snapshot[] };
-export const financeKeys = ['marketplace', 'coaching', 'finance', 'revenue-config', 'revenue-settlements', 'coach-profiles', 'coach-slots'] as const;
+export type FinanceDocuments = { marketplace: MarketplaceData; finance: FinanceRow[]; coaching: Enrollment[]; 'coach-profiles'?: Coach[]; 'coach-slots'?: CoachSlot[]; 'court-venues'?: Venue[]; 'revenue-config': RevenueConfig[]; 'revenue-settlements': Snapshot[] };
+export const financeKeys = ['marketplace', 'coaching', 'finance', 'revenue-config', 'revenue-settlements', 'coach-profiles', 'coach-slots', 'court-venues'] as const;
 export const allRows = (docs: FinanceDocuments) => financeRows(docs.finance, docs.coaching, docs.marketplace);
 import { platformDistribution, type PlatformDistribution } from '../src/revenueMath';
 export { platformDistribution } from '../src/revenueMath';

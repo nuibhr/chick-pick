@@ -6,6 +6,7 @@ import { fail, type Actor } from './pilotDomain';
 import { recordVerifiedTransfer } from './receiptVerification';
 import { stripeLocksPayment, stripePublicView } from '../src/paymentTypes';
 import { publicTransferAccount } from '../src/paymentChannels';
+import { catalogManagement, venueOpen } from './catalogManagement';
 
 const active = (e: Enrollment) => !e.cancelledAt && !lessonHoldExpired(e) && e.lessons.some(l => l.status !== 'cancelled');
 const reserved = (docs: FinanceDocuments, slot: CoachSlot) => docs.coaching.some(e => e.coachId === slot.coachId && active(e) && e.lessons.some(l => l.status !== 'cancelled' && Date.parse(l.start) < Date.parse(slot.start) + slot.hours * 3600000 && Date.parse(l.start) + l.hours * 3600000 > Date.parse(slot.start)));
@@ -18,11 +19,11 @@ const profiles = (docs: FinanceDocuments) => docs['coach-profiles'] ||= [];
 const slots = (docs: FinanceDocuments) => docs['coach-slots'] ||= [];
 
 export function coachCatalog(docs: FinanceDocuments, bookingEnabled: boolean) {
-  const coaches = profiles(docs).filter(c => c.active !== false);
+  const coaches = profiles(docs).filter(c => c.active !== false && venueOpen(docs, c.venue));
   return { coaches: coaches.map(({ bookingFee, ...c }) => ({ ...c, bookingReady: bookingFee !== undefined })), slots: slots(docs).filter(s => coaches.some(c => c.id === s.coachId) && Date.parse(s.start) > Date.now()).map(s => { const fee = coaches.find(c => c.id === s.coachId)?.bookingFee; return { ...s, bookingReady: fee !== undefined && Math.round(fee * 100) <= Math.round(s.price * 100), status: reserved(docs, s) ? 'booked' as const : s.status }; }), bookingEnabled, demo: false };
 }
 export function coachAdmin(docs: FinanceDocuments) {
-  return { coaches: profiles(docs), slots: slots(docs).map(s => ({ ...s, status: reserved(docs, s) ? 'booked' as const : s.status })), enrollments: docs.coaching.map(e => ({...e, cancelledAt: e.cancelledAt || (lessonHoldExpired(e) ? e.holdExpiresAt : undefined)})), demo: false };
+  return { coaches: profiles(docs).map(c => ({ ...c, management: catalogManagement(docs, 'coach', c.id) })), slots: slots(docs).map(s => ({ ...s, management: catalogManagement(docs, 'slot', s.id), status: reserved(docs, s) ? 'booked' as const : s.status })), enrollments: docs.coaching.map(e => ({...e, cancelledAt: e.cancelledAt || (lessonHoldExpired(e) ? e.holdExpiresAt : undefined)})), demo: false };
 }
 export function saveCoach(docs: FinanceDocuments, v: Record<string, unknown>, id?: string, canConfigure = true) {
   if (typeof v.hourlyRate !== 'number' || !Number.isFinite(v.hourlyRate) || v.hourlyRate <= 0 || v.hourlyRate > 100000 || Math.abs(v.hourlyRate * 100 - Math.round(v.hourlyRate * 100)) > 0.00001 || typeof v.active !== 'boolean') fail(400, 'ระบุราคาเป็นบาทไม่เกิน 2 ทศนิยมและสถานะโค้ช');
@@ -32,6 +33,7 @@ export function saveCoach(docs: FinanceDocuments, v: Record<string, unknown>, id
   if (id && !existing) fail(404, 'ไม่พบโค้ช');
   if (!existing && rows.length >= 100) fail(409, 'รองรับโค้ชสูงสุด 100 คน');
   const name = text(v.name, 80), coach: Coach = { id: existing?.id || crypto.randomUUID(), name, initials: [...name].slice(0, 2).join(''), specialty: text(v.specialty, 120), bio: text(v.bio ?? '', 500, false), venue: text(v.venue, 120), hourlyRate: v.hourlyRate as number, active: v.active as boolean, courses: existing?.courses || [] };
+  if (!venueOpen(docs, coach.venue) && (!existing || existing.venue !== coach.venue || coach.active)) fail(400, 'เลือกสนามที่เปิดแสดงจากทะเบียนสนามก่อน');
   coach.bookingFee = v.bookingFee === undefined ? existing?.bookingFee : v.bookingFee as number;
   if (existing) Object.assign(existing, coach); else rows.push(coach);
   return coach;
@@ -39,6 +41,7 @@ export function saveCoach(docs: FinanceDocuments, v: Record<string, unknown>, id
 export function createCoachSlot(docs: FinanceDocuments, v: Record<string, unknown>) {
   const coach = profiles(docs).find(c => c.id === v.coachId && c.active !== false), start = typeof v.start === 'string' ? Date.parse(v.start) : NaN;
   const hours = v.hours;
+  if (coach && !venueOpen(docs, coach.venue)) fail(409, 'สนามของโค้ชหยุดรับจองแล้ว');
   if (!coach || !Number.isFinite(start) || start < Date.now() + 1800000 || start > Date.now() + 180 * 86400000 || start % 1800000 !== 0 || typeof hours !== 'number' || hours < 0.5 || hours > 4 || hours % 0.5 !== 0 || !['open', 'blocked'].includes(String(v.status))) fail(400, 'เลือกโค้ช วันเวลาใน 180 วัน ทุก 30 นาที และระยะเวลา 0.5–4 ชั่วโมง');
   const rows = slots(docs);
   if (rows.filter(s => Date.parse(s.start) > Date.now()).length >= 2000) fail(409, 'ช่วงเวลาล่วงหน้ามากเกินกำหนด');
@@ -49,6 +52,13 @@ export function createCoachSlot(docs: FinanceDocuments, v: Record<string, unknow
 export function changeCoachSlot(docs: FinanceDocuments, id: string, v: Record<string, unknown>) {
   const slot = slots(docs).find(s => s.id === id);
   if (!slot) fail(404, 'ไม่พบช่วงเวลา');
+  if (v.action === 'edit') {
+    const policy = catalogManagement(docs, 'slot', id);
+    if (!policy.canEdit) fail(409, policy.editReason);
+    const copy = { ...docs, 'coach-slots': slots(docs).filter(s => s.id !== id) };
+    const replacement = createCoachSlot(copy, { ...v, coachId: slot.coachId });
+    Object.assign(slot, replacement, { id }); return slot;
+  }
   if (Date.parse(slot.start) <= Date.now() || reserved(docs, slot)) fail(409, 'ช่วงเวลาผ่านแล้วหรือมีผู้จอง ต้องจัดการการจองก่อน');
   if (!['open', 'blocked'].includes(String(v.status))) fail(400, 'เลือกเปิดรับหรือหยุดสอน');
   slot.status = v.status as 'open' | 'blocked'; return slot;
@@ -57,6 +67,7 @@ export function bookLesson(docs: FinanceDocuments, actor: Actor, slotId: unknown
   if (!enabled || !account && !stripeReady) fail(503, 'ยังไม่เปิดรับจองหรือตั้งช่องทางชำระเงิน');
   const slot = slots(docs).find(s => s.id === slotId), coach = profiles(docs).find(c => c.id === slot?.coachId && c.active !== false);
   if (!slot || !coach) fail(404, 'ไม่พบช่วงเวลาของโค้ช');
+  if (!venueOpen(docs, coach.venue)) fail(409, 'สนามของโค้ชหยุดรับจองแล้ว');
   const existing = docs.coaching.find(e => e.playerId === 'line:' + actor.sub && active(e) && e.lessons.some(l => l.slotId === slot.id));
   if (existing) return { id: existing.id, repeated: true };
   if (coach.bookingFee === undefined || Math.round(coach.bookingFee * 100) > Math.round(slot.price * 100)) fail(409, 'เจ้าของต้องตั้งค่าหัวคิวที่ไม่เกินค่าเรียนก่อนเปิดจอง');

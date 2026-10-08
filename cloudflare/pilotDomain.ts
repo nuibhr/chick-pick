@@ -7,7 +7,7 @@ export class PilotError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 export const fail = (status: number, message: string): never => { throw new PilotError(status, message); };
-export type PilotContext = { account: TransferAccount | null; enabled: boolean; closed: string[]; paymentProvider?: 'manual' | 'stripe'; stripeReady?: boolean };
+export type PilotContext = { account: TransferAccount | null; enabled: boolean; closed: string[]; venues?: import('../src/venueTypes').Venue[]; paymentProvider?: 'manual' | 'stripe'; stripeReady?: boolean };
 export type Actor = { sub: string; name: string };
 export const unavailableOcr = () => ({ status: 'unavailable' as const, amount: null, transferredAt: null, reference: null, sender: null, receiver: null, rawText: null, confidence: null });
 const future = (session?: Session) => session && session.status !== 'completed' && Number.isFinite(Date.parse(session.startsAt)) && Date.parse(session.startsAt) > Date.now();
@@ -19,6 +19,7 @@ export function book(data: MarketplaceData, context: PilotContext, actor: Actor,
   if (!session) fail(404, 'ไม่พบก๊วน');
   const existing = data.bookings.find(b => b.sessionId === sessionId && b.playerId === `line:${actor.sub}` && activeBooking(b));
   if (existing) return { id: existing.id, repeated: true };
+  if (session.bookingPaused || !(context.venues || []).some(v => v.active && (session.venueId ? v.id === session.venueId : v.name === session.venue))) fail(409, 'ก๊วนหรือสนามนี้หยุดรับจองแล้ว');
   if (!future(session) || data.bookings.filter(b => b.sessionId === sessionId && activeBooking(b)).length >= session.capacity) fail(409, 'ก๊วนนี้ปิดรับหรือเต็มแล้ว');
   if (context.paymentProvider === 'stripe' && (Date.parse(session.startsAt) < Date.now() + 35 * 60000 || session.price < 10 || session.price > 100000)) fail(409, 'PromptPay ต้องจองก่อนเริ่มอย่างน้อย 35 นาที และยอด 10–100,000 บาท');
   if (!Number.isSafeInteger(Math.round(session.price * 100)) || session.price <= 0) fail(409, 'ราคาก๊วนไม่ถูกต้อง ติดต่อผู้จัด');
