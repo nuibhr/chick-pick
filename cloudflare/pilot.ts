@@ -15,6 +15,7 @@ import { checkSlipOkConnection, slipokConfigured, type SlipOkEnv } from './slipo
 import { checkStoredReceipt } from './slipokReceipts';
 import { configuredChannels, parsePaymentChannels, transferOptions, type TransferSettings } from '../src/paymentChannels';
 import { createQrTicket, readQrTicket, paymentQrPayload, paymentQrPng, paymentQrPage } from './paymentQr';
+import { paymentQrPhone } from '../src/paymentChannels';
 import { stripeLocksPayment } from '../src/paymentTypes';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
@@ -87,7 +88,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
         return json({ url: new URL('/api/player/payments/qr/view?ticket=' + ticket, request.url).href });
       }
       const headers = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' };
-      if (path.endsWith('/view')) return new Response(paymentQrPage(new URL(request.url).searchParams.get('ticket')!, account.accountName, amount, account.kind !== 'promptpay'), { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" } });
+      if (path.endsWith('/view')) return new Response(paymentQrPage(new URL(request.url).searchParams.get('ticket')!, account.accountName, amount, !paymentQrPhone(account)), { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" } });
       return new Response(await paymentQrPng(payload), { headers: { ...headers, 'Content-Type': 'image/png', 'Content-Disposition': (new URL(request.url).searchParams.get('download') === '1' ? 'attachment' : 'inline') + '; filename="chick-pick-payment-qr.png"' } });
     }
     if (path === '/api/stripe/webhook') {

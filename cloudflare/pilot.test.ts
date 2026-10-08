@@ -11,7 +11,35 @@ import { cancel } from './pilotDomain';
 import { lessonHoldExpired } from '../src/coachingTypes';
 import { activeTransferAccount, type TransferSettings } from '../src/paymentChannels';
 import { createQrTicket } from './paymentQr';
+import { PNG } from 'pngjs';
+import jsQR from 'jsqr';
+import generatePayload from 'promptpay-qr';
 const stripeAudit = { actorId: 'test', actorType: 'admin' as const, action: 'test.stripe', entityId: 'fixture' };
+
+test('owner enables bank PromptPay for new game and coaching bookings; old booking destinations and QR amounts remain frozen', async t => {
+  const f = fixture(t), owner = await f.signIn(), path = '/api/marketplace/setup/transfer-channels';
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  const bank = { id: 'bank', kind: 'bank', enabled: true, bankName: 'BAY', accountName: 'Bank fixture', accountNumber: '1234567890' };
+  await f.request(path, { channels: [bank] }, owner);
+  const old = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking;
+  assert.equal((await f.request(path, { channels: [{ ...bank, bankPromptPayPhone: '0899999999' }] }, owner)).status, 200);
+  const fresh = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('b'))).json()).booking;
+  assert.equal(f.data.bookings.find(b => b.id === old.id)!.transferAccount!.bankPromptPayPhone, undefined);
+  assert.equal(f.data.bookings.find(b => b.id === fresh.id)!.transferAccount!.bankPromptPayPhone, '0899999999');
+  const coach = await (await f.request('/api/coaching/coaches', { name: 'Fixture', specialty: 'Test', bio: '', venue: 'Court', hourlyRate: 550, bookingFee: 100, active: true }, owner)).json();
+  const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start: new Date(Math.ceil((Date.now() + 86400000) / 1800000) * 1800000).toISOString(), hours: 1, status: 'open' }, owner)).json();
+  const lesson = await (await f.request('/api/player/lessons', { slotId: slot.id }, f.player('b'))).json();
+  await f.request(path, { channels: [{ ...bank, bankPromptPayPhone: '0888888888' }] }, owner);
+  for (const row of [{ kind: 'game', id: fresh.id, amount: 190 }, { kind: 'coaching', id: lesson.id, amount: 550 }]) {
+    const result = await (await f.request('/api/player/payments/qr', { ...row, channel: 'bank', amount: 1 }, f.player('b'))).json();
+    assert.ok(result.url);
+    const pagePath = new URL(result.url).pathname + new URL(result.url).search;
+    const page = await (await f.request(pagePath)).text(); assert.match(page, /QR พร้อมเพย์ระบุยอดจองแล้ว/); assert.doesNotMatch(page, /กรอกยอดจอง/);
+    const image = await f.request(pagePath.replace('/view?', '/image?'));
+    const png = PNG.sync.read(Buffer.from(await image.arrayBuffer()));
+    assert.equal(jsQR(new Uint8ClampedArray(png.data), png.width, png.height)?.data, generatePayload('0899999999', { amount: row.amount }));
+  }
+});
 
 test('external QR download only serves an owned unpaid booking snapshot and stops after a pending receipt, cancellation or expiry', async t => {
   const f = fixture(t), owner = await f.signIn();

@@ -19,6 +19,11 @@ export function parsePaymentChannels(value: unknown): PaymentChannel[] | null {
     if (kind === 'bank' ? !/^\d{10,15}$/.test(number) || !text(v.bankName) : !validMobile(number)) return null;
     const qr = v.bankQrPayload === undefined ? undefined : kind === 'bank' ? staticBankQr(v.bankQrPayload) : null;
     if (qr === null) return null;
+    let bankPromptPayPhone: string | undefined;
+    if (v.bankPromptPayPhone !== undefined) {
+      if (kind !== 'bank' || typeof v.bankPromptPayPhone !== 'string' || !validMobile(v.bankPromptPayPhone)) return null;
+      bankPromptPayPhone = mobileNumber(v.bankPromptPayPhone);
+    }
     let linkedBank: TransferAccount['linkedBank'];
     if (v.linkedBank !== undefined) {
       if (kind !== 'promptpay' || !v.linkedBank || typeof v.linkedBank !== 'object') return null;
@@ -26,10 +31,15 @@ export function parsePaymentChannels(value: unknown): PaymentChannel[] | null {
       if (!text(linked.bankName) || typeof linked.accountNumber !== 'string' || !/^\d{10,15}$/.test(mobileNumber(linked.accountNumber))) return null;
       linkedBank = { bankName: linked.bankName.trim(), accountNumber: mobileNumber(linked.accountNumber) };
     }
-    result.push({ id: kind, kind, enabled: v.enabled, bankName: kind === 'promptpay' ? 'พร้อมเพย์' : String(v.bankName).trim(), accountName: v.accountName.trim(), accountNumber: number, ...(qr ? { bankQrPayload: qr } : {}), ...(linkedBank ? { linkedBank } : {}) });
+    result.push({ id: kind, kind, enabled: v.enabled, bankName: kind === 'promptpay' ? 'พร้อมเพย์' : String(v.bankName).trim(), accountName: v.accountName.trim(), accountNumber: number, ...(qr ? { bankQrPayload: qr } : {}), ...(bankPromptPayPhone ? { bankPromptPayPhone } : {}), ...(linkedBank ? { linkedBank } : {}) });
   }
+  // Two destinations must not silently point at the same registered mobile.
+  const bank = result.find(c => c.kind === 'bank'), phone = result.find(c => c.kind === 'promptpay');
+  if (bank?.bankPromptPayPhone && bank.bankPromptPayPhone === phone?.accountNumber) return null;
   return result;
 }
+export const paymentQrPhone = (account: TransferAccount) => account.kind === 'promptpay' ? account.accountNumber : account.bankPromptPayPhone;
+export const paymentStaticQr = (account: TransferAccount) => paymentQrPhone(account) ? undefined : account.bankQrPayload;
 export function configuredChannels(settings: TransferSettings | null): PaymentChannel[] {
   if (settings?.channels !== undefined) return parsePaymentChannels(settings.channels) || [];
   if (!settings?.accountNumber || !settings.bankName || !settings.accountName) return [];

@@ -1,6 +1,6 @@
 # SlipOK บน Chick&Pick — 8 ตุลาคม 2026
 
-อัปเดตล่าสุด: หน้าแอดมินใช้ผล SlipOK เป็นสรุปยอด/ref สำหรับกดยืนยันเงินเข้า เพิ่ม QR ธนาคารจากภาพรับเงินที่เจ้าของแนบ และทางบันทึก QR บน iPhone ผ่านแชร์ไฟล์หรือหน้า HTTPS ใน Safari ดู [ผลแก้และขั้นตอนทดสอบ](PAYMENT-EXPERIENCE-2026-10-08.md)
+อัปเดตล่าสุด: ช่องกรุงศรีตั้งเบอร์พร้อมเพย์ของบัญชีนี้เองเพื่อสร้าง QR ตามยอดจองได้ แยกจากพร้อมเพย์บัญชีที่สอง ดู [ตั้งค่ากรุงศรีพร้อมเพย์และผลทดสอบ](BANK-PROMPTPAY-2026-10-08.md) หน้าแอดมินใช้ผล SlipOK เป็นสรุปยอด/ref สำหรับกดยืนยันเงินเข้า และมีทางบันทึก QR บน iPhone ผ่านแชร์ไฟล์หรือหน้า HTTPS ใน Safari ดู [ผลแก้ก่อนหน้า](PAYMENT-EXPERIENCE-2026-10-08.md)
 
 Cloudflare Worker ใช้โอนเงินและแนบสลิปสำหรับการจองใหม่ ทั้ง Open Play และโค้ช ปิด API สร้าง Stripe Checkout ใหม่แล้ว ไม่มีช่องกรอก Secret ในหน้าแอป คีย์อ่านจาก `env.SLIPOK_API_KEY` ฝั่งเซิร์ฟเวอร์เท่านั้น Node preview ไม่ได้เพิ่ม SlipOK ในรอบนี้
 
@@ -37,6 +37,6 @@ Cloudflare Worker ใช้โอนเงินและแนบสลิป�
 
 ## ขอบเขตการทดสอบ
 
-Tests 83/83 ผ่าน ใช้ API fixtures ตรวจยอด/บัญชีผิด, สลิปซ้ำพร้อมกัน, manual approval, ธนาคารล่าช้า, server pricing ของโค้ช, quota privacy, สิทธิ์แอดมิน, ช่องทางรับเงินแยกบัญชี, ฟอร์มตรวจชำระ, ลิงก์ QR อายุสั้น และถอดรหัส PNG QR เพื่อตรวจเบอร์และยอดถึงสตางค์ ผลทดสอบไม่แทนการโอนจริง ยังต้องทดสอบสลิปผู้รับที่ถูกต้องด้วยผู้เล่น LINE อีกบัญชี
+Tests 87/87 ผ่าน ใช้ API fixtures ตรวจยอด/บัญชีผิด, สลิปซ้ำพร้อมกัน, manual approval, ธนาคารล่าช้า, server pricing ของโค้ช, quota privacy, สิทธิ์แอดมิน, ช่องทางรับเงินแยกบัญชี, กรุงศรีพร้อมเพย์ตามยอด, ฟอร์มตรวจชำระ, ลิงก์ QR อายุสั้น และถอดรหัส PNG QR เพื่อตรวจเบอร์และยอดถึงสตางค์ ผลทดสอบไม่แทนการโอนจริง ยังต้องทดสอบสลิปผู้รับที่ถูกต้องด้วยผู้เล่น LINE อีกบัญชี
 
 อ้างอิง: [Check Slip](https://slipok.com/api-documentation/check-slip/), [Error codes](https://slipok.com/api-documentation/error-status-code/), [Quota](https://slipok.com/api-documentation/check-slip-quota/), [Bank codes](https://slipok.com/api-documentation/bank-code/)

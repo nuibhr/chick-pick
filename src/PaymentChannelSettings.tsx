@@ -6,23 +6,31 @@ import BankQrInput from './BankQrInput';
 export default function PaymentChannelSettings({ channels, busy, save }: { channels: PaymentChannel[]; busy: boolean; save: (channels: PaymentChannel[]) => Promise<boolean> }) {
   const [readingQr, setReadingQr] = useState(false);
   const [bank, setBank] = useState<PaymentChannel>(channels.find(c => c.kind === 'bank') || { id: 'bank', kind: 'bank', enabled: false, bankName: '', accountName: '', accountNumber: '' });
+  const [bankDynamic, setBankDynamic] = useState(Boolean(bank.bankPromptPayPhone));
+  const [bankConfirmed, setBankConfirmed] = useState(Boolean(bank.bankPromptPayPhone));
   const [phone, setPhone] = useState(channels.find(c => c.kind === 'promptpay') || { id: 'promptpay' as const, kind: 'promptpay' as const, enabled: false, bankName: 'พร้อมเพย์', accountName: '', accountNumber: '' });
   const [linked, setLinked] = useState(Boolean(phone.linkedBank));
   const [linkedName, setLinkedName] = useState(phone.linkedBank?.bankName || ''), [linkedNumber, setLinkedNumber] = useState(phone.linkedBank?.accountNumber || '');
   async function submit(e: FormEvent) {
     e.preventDefault();
     const values: PaymentChannel[] = [];
-    if (bank.enabled || bank.accountName || bank.accountNumber || bank.bankName) values.push(bank);
+    if (bankDynamic && !bankConfirmed) return;
+    if (bank.enabled || bank.accountName || bank.accountNumber || bank.bankName) values.push({ ...bank, bankPromptPayPhone: bankDynamic ? bank.bankPromptPayPhone : undefined });
     if (phone.enabled || phone.accountName || phone.accountNumber) values.push({ ...phone, linkedBank: linked ? { bankName: linkedName, accountNumber: linkedNumber } : undefined });
     await save(values);
   }
   return <section className="wp-section"><h2>ช่องทางรับเงินที่แสดงให้ลูกค้า</h2><p>เปิดบัญชีธนาคาร พร้อมเพย์ หรือทั้งสองช่องทางได้ พร้อมเพย์เป็นคนละบัญชีรับเงินได้ การเปลี่ยนนี้ใช้กับการจองใหม่ รายการเดิมเก็บช่องทาง ณ ตอนจอง</p>
     <form className="wp-form" onSubmit={e => void submit(e)}>
       <fieldset className="wp-payment-channel"><legend><Building2 size={18} /> บัญชีธนาคาร</legend><label className="wp-check"><input type="checkbox" checked={bank.enabled} onChange={e => setBank({ ...bank, enabled: e.target.checked })} />เปิดแสดงบัญชีธนาคาร</label>
-        <label>ธนาคาร<input required={bank.enabled || Boolean(bank.accountNumber)} value={bank.bankName} onChange={e => setBank({ ...bank, bankName: e.target.value, bankQrPayload: undefined })} maxLength={120} placeholder="เช่น กรุงศรี" /></label>
-        <label>ชื่อบัญชีธนาคาร<input required={bank.enabled || Boolean(bank.accountNumber)} value={bank.accountName} onChange={e => setBank({ ...bank, accountName: e.target.value })} maxLength={120} /></label>
-        <label>เลขบัญชีธนาคาร<input required={bank.enabled || Boolean(bank.accountName)} value={bank.accountNumber} onChange={e => setBank({ ...bank, accountNumber: e.target.value, bankQrPayload: undefined })} inputMode="numeric" pattern="[0-9 -]{10,20}" maxLength={20} /></label>
-        <BankQrInput value={bank.bankQrPayload} change={bankQrPayload => setBank(current => ({ ...current, bankQrPayload }))} busyChanged={setReadingQr} />
+        <label>ธนาคาร<input required={bank.enabled || Boolean(bank.accountNumber)} value={bank.bankName} onChange={e => { setBank({ ...bank, bankName: e.target.value, bankQrPayload: undefined }); setBankConfirmed(false); }} maxLength={120} placeholder="เช่น กรุงศรี" /></label>
+        <label>ชื่อบัญชีธนาคาร<input required={bank.enabled || Boolean(bank.accountNumber)} value={bank.accountName} onChange={e => { setBank({ ...bank, accountName: e.target.value }); setBankConfirmed(false); }} maxLength={120} /></label>
+        <label>เลขบัญชีธนาคาร<input required={bank.enabled || Boolean(bank.accountName)} value={bank.accountNumber} onChange={e => { setBank({ ...bank, accountNumber: e.target.value, bankQrPayload: undefined }); setBankConfirmed(false); }} inputMode="numeric" pattern="[0-9 -]{10,20}" maxLength={20} /></label>
+        <label className="wp-check"><input type="checkbox" checked={bankDynamic} onChange={e => { setBankDynamic(e.target.checked); setBankConfirmed(false); }} />สร้าง QR พร้อมยอดจองผ่านพร้อมเพย์ที่ผูกบัญชีนี้</label>
+        {bankDynamic ? <>
+          <label>เบอร์พร้อมเพย์ที่ผูกกับบัญชีธนาคารด้านบน<input type="tel" required value={bank.bankPromptPayPhone || ''} onChange={e => { setBank({ ...bank, bankPromptPayPhone: e.target.value }); setBankConfirmed(false); }} inputMode="tel" pattern="0[689][0-9 -]{8,12}" maxLength={14} placeholder="เบอร์พร้อมเพย์ของบัญชีกรุงศรี 10 หลัก" /></label>
+          <label className="wp-check"><input type="checkbox" required checked={bankConfirmed} onChange={e => setBankConfirmed(e.target.checked)} />ยืนยันว่าเบอร์นี้ลงทะเบียนพร้อมเพย์กับบัญชีธนาคารด้านบนแล้ว</label>
+          <small>ใช้เบอร์ของบัญชีนี้เอง แยกจากพร้อมเพย์บัญชีที่สองด้านล่าง ระบบสร้าง QR พร้อมยอดก๊วนหรือค่าเรียนให้ แต่ไม่ได้ผูกเบอร์กับธนาคารให้ ต้องตรวจชื่อผู้รับและธนาคารในแอปธนาคารก่อนเปิดรับจริง การจองเดิมยังใช้ข้อมูลเดิม</small>
+        </> : <BankQrInput value={bank.bankQrPayload} change={bankQrPayload => setBank(current => ({ ...current, bankQrPayload }))} busyChanged={setReadingQr} />}
       </fieldset>
       <fieldset className="wp-payment-channel"><legend><Smartphone size={18} /> พร้อมเพย์ด้วยเบอร์โทร</legend><label className="wp-check"><input type="checkbox" checked={phone.enabled} onChange={e => setPhone({ ...phone, enabled: e.target.checked })} />เปิดแสดงพร้อมเพย์และ QR ตามยอดจอง</label>
         <label>ชื่อผู้รับพร้อมเพย์<input required={phone.enabled || Boolean(phone.accountNumber)} value={phone.accountName} onChange={e => setPhone({ ...phone, accountName: e.target.value })} maxLength={120} /></label>

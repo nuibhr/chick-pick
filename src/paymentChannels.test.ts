@@ -4,7 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { PNG } from 'pngjs';
 import jsQR from 'jsqr';
-import { activeTransferAccount, configuredChannels, parsePaymentChannels, publicTransferAccount, transferOptions, type PaymentChannel } from './paymentChannels';
+import { activeTransferAccount, configuredChannels, parsePaymentChannels, publicTransferAccount, transferOptions, paymentQrPhone, paymentStaticQr, type PaymentChannel } from './paymentChannels';
 import { promptPayImage, promptPayPayload } from './promptPay';
 import { slipokResult, matchesSlipMobile } from '../cloudflare/slipok';
 import { recordVerifiedTransfer } from '../cloudflare/receiptVerification';
@@ -16,6 +16,29 @@ const bank: PaymentChannel = { id: 'bank', kind: 'bank', enabled: true, bankName
 const phone: PaymentChannel = { id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'Phone fixture', accountNumber: '0812345678', linkedBank: { bankName: 'KBANK', accountNumber: '9876543210' } };
 const now = Date.parse('2026-10-08T06:00:00Z'), bookedAt = '2026-10-08T05:50:00Z';
 const payload = () => ({ success: true, data: { success: true, transRef: 'CHANNELTEST0001', amount: 190, receivingBank: '004', countryCode: 'TH', transDate: '20261008', transTime: '12:55:00', receiver: { displayName: 'Phone fixture', proxy: { type: 'MSISDN', value: '081xxx5678' }, account: { type: 'BANKAC', value: 'xxx-x-x4321-x' } } } });
+
+test('bank PromptPay uses its own normalized mobile and preserves booking snapshots separately from the other account', () => {
+  const parsed = parsePaymentChannels([{ ...bank, bankPromptPayPhone: '089-999-9999' }, phone])!;
+  assert.equal(parsed[0].bankPromptPayPhone, '0899999999');
+  const snapshot = activeTransferAccount({ channels: parsed })!;
+  parsed[0].bankPromptPayPhone = '0888888888';
+  assert.equal(paymentQrPhone(snapshot), '0899999999');
+  assert.equal(paymentQrPhone(snapshot.alternatives![0]), phone.accountNumber);
+  assert.equal(paymentStaticQr(snapshot), undefined);
+  for (const channels of [[{ ...bank, bankPromptPayPhone: '12345' }], [{ ...phone, bankPromptPayPhone: '0899999999' }], [{ ...bank, bankPromptPayPhone: phone.accountNumber }, phone]]) assert.equal(parsePaymentChannels(channels), null);
+  const html = renderToStaticMarkup(createElement(PlayerTransferInstructions, { account: snapshot, amount: 12050, slipok: true, pending: false }));
+  assert.match(html, /QR พร้อมเพย์ที่ผูกกับ BAY/); assert.match(html, /120\.50/); assert.doesNotMatch(html, /กรอกยอดจองด้านบนเอง/);
+});
+
+test('bank-linked PromptPay slip stays bank-classified and rejects relinked bank or contradictory account', () => {
+  const account = activeTransferAccount({ channels: [{ ...bank, bankPromptPayPhone: '0899999999' }, phone] })!;
+  const slip = payload(); slip.data.receivingBank = '025'; slip.data.receiver.proxy.value = '089xxx9999'; slip.data.receiver.account.value = '';
+  assert.equal(slipokResult(slip, true, 19000, account, bookedAt, now).paymentChannel, 'bank');
+  slip.data.receivingBank = '004'; assert.equal(slipokResult(slip, true, 19000, account, bookedAt, now).status, 'rejected');
+  slip.data.receivingBank = '025'; slip.data.receiver.account.value = 'xxx-x-x9999-x'; assert.equal(slipokResult(slip, true, 19000, account, bookedAt, now).status, 'rejected');
+  slip.data.receiver.account.value = 'xxx-x-x6789-x'; slip.data.receiver.proxy.value = ''; assert.equal(slipokResult(slip, true, 19000, account, bookedAt, now).paymentChannel, 'bank');
+  assert.equal(slipokResult(payload(), true, 19000, account, bookedAt, now).paymentChannel, 'promptpay');
+});
 
 test('channel settings migrate the old bank, only snapshot enabled recipients, and keep linked-bank details private', () => {
   assert.equal(configuredChannels(bank).length, 1);

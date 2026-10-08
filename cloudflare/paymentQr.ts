@@ -2,9 +2,11 @@ import core from 'qrcode/lib/core/qrcode.js';
 import type { TransferAccount } from '../src/marketplaceTypes';
 import { promptPayPayload } from '../src/promptPay';
 import { staticBankQr } from '../src/bankQr';
+import { paymentQrPhone } from '../src/paymentChannels';
 
 export function paymentQrPayload(account: TransferAccount, amount: number) {
-  if (account.kind === 'promptpay') return promptPayPayload(account.accountNumber, amount);
+  const phone = paymentQrPhone(account);
+  if (phone) return promptPayPayload(phone, amount);
   const qr = staticBankQr(account.bankQrPayload); if (!qr) throw Error('ยังไม่มี QR รับเงินของธนาคาร'); return qr;
 }
 const enc = new TextEncoder();
@@ -41,8 +43,8 @@ export async function paymentQrPng(payload: string) {
   const compressed = new Uint8Array(await new Response(new Blob([pixels]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer());
   return concat(new Uint8Array([137,80,78,71,13,10,26,10]), chunk('IHDR', concat(uint(size), uint(size), new Uint8Array([1,0,0,0,0]))), chunk('IDAT', compressed), chunk('IEND', new Uint8Array()));
 }
-export function paymentQrPage(ticket: string, recipient: string, amount: number, isBank: boolean) {
+export function paymentQrPage(ticket: string, recipient: string, amount: number, isStatic: boolean) {
   const escape = (v: string) => v.replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]!));
   const image = '/api/player/payments/qr/image?ticket=' + encodeURIComponent(ticket);
-  return `<!doctype html><html lang="th"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Chick&Pick · บันทึก QR รับเงิน</title><style>body{font:16px system-ui;background:#f4f7ee;color:#17352a;margin:0;padding:24px;text-align:center}main{max-width:440px;margin:auto;background:white;padding:24px;border-radius:24px}img{width:100%;max-width:330px;height:auto}a{display:block;padding:16px;background:#285b3e;color:white;border-radius:12px;text-decoration:none}small{display:block;line-height:1.7;margin:16px 0}</style><main><h1>Chick&Pick</h1><p>${escape(recipient)}</p><h2>ยอดจอง ฿${(amount / 100).toFixed(2)}</h2><img src="${image}" alt="QR รับเงิน"><a href="${image}&download=1" download="chick-pick-payment-qr.png">ดาวน์โหลดภาพ QR</a><small>บน iPhone: แตะภาพค้าง → บันทึกไปยังรูปภาพ หรือใช้ปุ่มดาวน์โหลด${isBank ? ' · QR ธนาคารไม่ระบุยอด กรอกยอดจองที่แสดงด้านบนเอง' : ''}<br>ตรวจชื่อผู้รับและยอดในแอปธนาคารก่อนโอน จากนั้นกลับเข้า LINE เพื่อแนบสลิป</small><p>ลิงก์นี้ใช้ได้ 5 นาที และใช้รับเงินเฉพาะการจองนี้</p></main></html>`;
+  return `<!doctype html><html lang="th"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Chick&Pick · บันทึก QR รับเงิน</title><style>body{font:16px system-ui;background:#f4f7ee;color:#17352a;margin:0;padding:24px;text-align:center}main{max-width:440px;margin:auto;background:white;padding:24px;border-radius:24px}img{width:100%;max-width:330px;height:auto}a{display:block;padding:16px;background:#285b3e;color:white;border-radius:12px;text-decoration:none}small{display:block;line-height:1.7;margin:16px 0}</style><main><h1>Chick&Pick</h1><p>${escape(recipient)}</p><h2>ยอดจอง ฿${(amount / 100).toFixed(2)}</h2><img src="${image}" alt="QR รับเงิน"><a href="${image}&download=1" download="chick-pick-payment-qr.png">ดาวน์โหลดภาพ QR</a><small>บน iPhone: แตะภาพค้าง → บันทึกไปยังรูปภาพ หรือใช้ปุ่มดาวน์โหลด${isStatic ? ' · QR ธนาคารไม่ระบุยอด กรอกยอดจองที่แสดงด้านบนเอง' : ' · QR พร้อมเพย์ระบุยอดจองแล้ว'}<br>ตรวจชื่อผู้รับ ธนาคาร และยอดในแอปธนาคารก่อนโอน จากนั้นกลับเข้า LINE เพื่อแนบสลิป</small><p>ลิงก์นี้ใช้ได้ 5 นาที และใช้รับเงินเฉพาะการจองนี้</p></main></html>`;
 }

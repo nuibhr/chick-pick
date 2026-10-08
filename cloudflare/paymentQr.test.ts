@@ -8,6 +8,17 @@ import { staticBankQr } from '../src/bankQr';
 import { parsePaymentChannels } from '../src/paymentChannels';
 import { qrImageFile, saveQrImage } from '../src/qrExport';
 
+test('bank-linked PromptPay QR prepopulates amount and overrides an older static QR without using the second mobile', async () => {
+  const account = { kind: 'bank' as const, bankName: 'BAY', accountName: 'Bank fixture', accountNumber: '1234567890', bankPromptPayPhone: '0899999999', bankQrPayload: generatePayload('0812345678', {}) };
+  const payload = paymentQrPayload(account, 12050);
+  assert.equal(payload, generatePayload('0899999999', { amount: 120.50 }));
+  assert.notEqual(payload, generatePayload('0812345678', { amount: 120.50 }));
+  const png = PNG.sync.read(Buffer.from(await paymentQrPng(payload)));
+  assert.equal(jsQR(new Uint8ClampedArray(png.data), png.width, png.height)?.data, payload);
+  const page = paymentQrPage('fixture', account.accountName, 12050, false);
+  assert.match(page, /QR พร้อมเพย์ระบุยอดจองแล้ว/); assert.doesNotMatch(page, /กรอกยอดจอง/);
+});
+
 test('Worker PNG can be decoded to the exact dynamic or uploaded static Thai payment QR', async () => {
   const phone = { kind: 'promptpay' as const, bankName: 'พร้อมเพย์', accountName: 'Test', accountNumber: '0812345678' };
   const staticQr = generatePayload('0812345678', {});

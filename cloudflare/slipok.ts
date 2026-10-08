@@ -72,7 +72,11 @@ function receiverChannel(receiver: Record<string, unknown>, receivingBank: strin
     if (channel.kind === 'promptpay') return Boolean(banks[receivingBank]) && (
       proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, channel.accountNumber)
       || channel.linkedBank && bankMatches(channel.linkedBank.bankName) && bankAccount.type === 'BANKAC' && matchesSlipAccount(bankAccount.value, channel.linkedBank.accountNumber));
-    return bankMatches(channel.bankName) && matchesSlipAccount(bankAccount.value, channel.accountNumber);
+    if (!bankMatches(channel.bankName)) return false;
+    if (matchesSlipAccount(bankAccount.value, channel.accountNumber)) return true;
+    // A mobile may have been relinked: a contradictory receiving account must not pass.
+    if (bankAccount.type === 'BANKAC' && short(bankAccount.value)) return false;
+    return Boolean(channel.bankPromptPayPhone && proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, channel.bankPromptPayPhone));
   });
 }
 
