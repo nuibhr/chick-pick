@@ -3,6 +3,7 @@ import { financeRows, summarize, thaiDate, validDate } from '../src/financeModel
 import { buildRevenueUnits, defaultRevenueConfig } from '../src/revenueMath';
 import type { Coach, CoachSlot, Enrollment } from '../src/coachingTypes';
 import type { MarketplaceData } from '../src/marketplaceTypes';
+import { activeBooking } from '../src/marketplaceTypes';
 import type { PlatformAllocation, RevenueConfig, RevenueReport, RevenueUnit } from '../src/revenueTypes';
 import { digest } from './pilotAuth';
 import { fail } from './pilotDomain';
@@ -58,7 +59,7 @@ export async function settle(docs: FinanceDocuments, v:Record<string,unknown>) {
   if(unit.settlement)fail(409,'ปิดยอดนี้แล้ว ไม่สร้างใบซ้ำ');
   if(unit.deficit||unit.overpaid)fail(409,'มีต้นทุนหรือยอดจ่ายเกินส่วนแบ่ง ต้องตรวจยอด');
   if(v.fingerprint!==unit.fingerprint||v.configVersion!==state.config.version)fail(409,'ยอดหรือสูตรเปลี่ยน กรุณารีเฟรช');
-  if(unit.kind==='game'&&docs.marketplace.bookings.some(b=>`game:${b.sessionId}`===unit.key&&!b.cancelledAt&&(!b.paidAt||b.receipts?.at(-1)?.status==='pending')))fail(409,'ยังมีการจองหรือสลิปรอตรวจ จัดการให้ครบก่อนปิดยอด');
+  if(unit.kind==='game'&&docs.marketplace.bookings.some(b=>`game:${b.sessionId}`===unit.key&&activeBooking(b)&&(!b.paidAt||b.receipts?.at(-1)?.status==='pending')))fail(409,'ยังมีการจองหรือสลิปรอตรวจ จัดการให้ครบก่อนปิดยอด');
   if(unit.kind==='coaching'&&docs.coaching.some(e=>`coaching:${e.id}`===unit.key&&!e.cancelledAt&&(!e.paidAt||e.receipts?.at(-1)?.status==='pending'||e.lessons.some(l=>l.status==='scheduled'))))fail(409,'เรียนให้ครบและจัดการสลิปก่อนปิดยอดโค้ช');
   const snapshot:Snapshot={id:crypto.randomUUID(),key:unit.key,createdAt:new Date().toISOString(),configVersion:state.config.version,fingerprint:unit.fingerprint,rule:structuredClone(unit.rule),platform:unit.platform,partner:unit.partner,gross:unit.gross,refunds:unit.refunds,directCosts:unit.directCosts,processing:unit.processing,distributable:unit.distributable,platformAllocation:structuredClone(state.config.platformAllocation)};
   docs['revenue-settlements'].push(snapshot); return snapshot;

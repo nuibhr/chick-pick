@@ -4,6 +4,20 @@ import worker, { publicSession, verifyLineIdToken } from './tidbPreview';
 import type { Booking, MemberProfile, Session } from '../src/marketplaceTypes';
 import { TidbDocuments } from './tidbDocuments';
 
+test('own tickets expose server deadline and expiry without cancelling protected or old bookings', async t => {
+  const now = Date.now(), base: Booking = { id: 'expired', sessionId: 'game', playerId: 'line:user-1', playerName: 'Member', amount: 19000, title: 'Open Play', createdAt: new Date(now - 300001).toISOString(), holdExpiresAt: new Date(now - 1).toISOString() };
+  const bookings: Booking[] = [base, { ...base, id: 'paid', paidAt: new Date(now).toISOString() }, { ...base, id: 'legacy', holdExpiresAt: undefined }, { ...base, id: 'foreign', playerId: 'line:someone-else' }];
+  t.mock.method(TidbDocuments.prototype, 'readMarketplace', async () => ({ sessions: [], bookings }));
+  t.mock.method(TidbDocuments.prototype, 'readDocument', async () => []);
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ iss: 'https://access.line.me', aud: 'configured-channel', sub: 'user-1', exp: Math.floor(Date.now() / 1000) + 60, name: 'Member' }));
+  const response = await worker.fetch(new Request('https://example.com/api/player/bookings', { headers: { Authorization: 'Bearer test-line-token-member' } }), { LINE_CHANNEL_ID: 'configured-channel', TIDB_DATABASE_URL: 'mysql://fixture:fixture@gateway01.ap-southeast-1.prod.aws.tidbcloud.com/test', ASSETS: { fetch: async () => new Response('unused') } });
+  assert.equal(response.status, 200);
+  const own = await response.json();
+  assert.equal(own.bookings.length, 3); assert.ok(own.serverNow >= now);
+  assert.equal(own.bookings[0].holdExpiresAt, base.holdExpiresAt); assert.equal(own.bookings[0].holdExpired, true);
+  assert.equal(own.bookings[0].cancelledAt, null); assert.equal(own.bookings[1].holdExpired, false); assert.equal(own.bookings[2].holdExpired, false);
+});
+
 test('private document path cannot be served by public asset binding', async () => {
   const response = await worker.fetch(new Request('https://example.com/brand/messageImage_1790922360771.jpg'), {
     ASSETS: { fetch: async () => { throw Error('must not serve private asset'); } },

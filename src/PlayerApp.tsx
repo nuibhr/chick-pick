@@ -2,6 +2,8 @@ import StripeBookingPayment from './StripeBookingPayment';
 import SlipVerificationStatus from './SlipVerificationStatus';
 import PlayerTransferInstructions from './PlayerTransferInstructions';
 import { paymentTicketLabel } from './paymentPresentation';
+import { paymentHoldExpired } from './bookingHold';
+import BookingHoldNotice from './BookingHoldNotice';
 import type { StripePayment } from './paymentTypes';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -20,7 +22,8 @@ import { initializeLine, reauthenticateLine } from './lineSession';
 import type { Venue } from './venueTypes';
 import './player-app.css';
 
-type BookingView = { stripe?: Pick<StripePayment, 'status' | 'mode' | 'expiresAt' | 'issue'> | null; holdExpiresAt?: string | null; kind?: 'game' | 'coaching'; startsAt?: string; venue?: string; completed?: boolean; transferAccount: TransferAccount | null; id: string; sessionId: string; amount: number; title: string; createdAt: string; paidAt: string | null; admissionStatus: 'pending' | 'approved'; cancelledAt: string | null; receipt: { id: string; status: 'pending' | 'approved' | 'rejected'; ocr: SlipOcr; verification?: import('../cloudflare/slipok').SlipVerification; rejectReason: string | null } | null };
+type BookingView = { stripe?: Pick<StripePayment, 'status' | 'mode' | 'expiresAt' | 'issue'> | null; holdExpiresAt?: string | null; holdExpired?: boolean; kind?: 'game' | 'coaching'; startsAt?: string; venue?: string; completed?: boolean; transferAccount: TransferAccount | null; id: string; sessionId: string; amount: number; title: string; createdAt: string; paidAt: string | null; admissionStatus: 'pending' | 'approved'; cancelledAt: string | null; receipt: { id: string; status: 'pending' | 'approved' | 'rejected'; ocr: SlipOcr; verification?: import('../cloudflare/slipok').SlipVerification; rejectReason: string | null } | null };
+type OwnBookings = { bookings: BookingView[]; serverNow?: number };
 type PlayerConfig = { slipokConfigured?: boolean; paymentProvider?: 'manual' | 'stripe'; stripeConfigured?: boolean; stripeMode?: 'test' | 'live' | null; liffId: string | null; connected: boolean; bookingEnabled: boolean; profileEditingEnabled?: boolean; pilot?: boolean };
 const baht = (n: number) => new Intl.NumberFormat('th-TH', { maximumFractionDigits: 2 }).format(n);
 
@@ -57,6 +60,12 @@ export default function PlayerApp() {
   const [registeredVenues, setRegisteredVenues] = useState<Venue[]>([]);
   const [needsAuth, setNeedsAuth] = useState(false);
   const [bookings, setBookings] = useState<BookingView[]>([]);
+  const [serverOffset, setServerOffset] = useState(0);
+  const [clockNow, setClockNow] = useState(Date.now());
+  const setOwnBookings = (own: OwnBookings) => {
+    setBookings(own.bookings);
+    if (typeof own.serverNow === 'number') { const offset = own.serverNow - Date.now(); setServerOffset(offset); setClockNow(Date.now() + offset); }
+  };
   const [token, setToken] = useState('');
   const [person, setPerson] = useState('');
   const [profile, setProfile] = useState<PlayerProfile | null>(null);
@@ -106,9 +115,9 @@ export default function PlayerApp() {
           const headers = { Authorization: 'Bearer ' + idToken };
           const [me, own] = await Promise.all([
             api<{ name: string; profile: PlayerProfile }>('/me', { headers }),
-            api<{ bookings: BookingView[] }>('/bookings', { headers }),
+            api<OwnBookings>('/bookings', { headers }),
           ]);
-          if (active) { setToken(idToken); setPerson(me.name); setProfile(me.profile); setBookings(own.bookings); }
+          if (active) { setToken(idToken); setPerson(me.name); setProfile(me.profile); setOwnBookings(own); }
         } catch (cause) {
           if (active) { handleUnauthorized(cause); setError('เชื่อม LINE ไม่สำเร็จ: ' + (cause as Error).message); }
         }
@@ -133,14 +142,39 @@ export default function PlayerApp() {
     let active = true;
     const refresh = () => {
       if (document.visibilityState !== 'visible') return;
-      void api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } })
-        .then(own => { if (active) setBookings(own.bookings); })
+      void api<OwnBookings>('/bookings', { headers: { Authorization: 'Bearer ' + token } })
+        .then(own => { if (active) setOwnBookings(own); })
         .catch(cause => { if (active) { handleUnauthorized(cause); setError((cause as Error).message); } });
     };
     const timer = window.setInterval(refresh, 30000);
     window.addEventListener('focus', refresh);
     return () => { active = false; window.clearInterval(timer); window.removeEventListener('focus', refresh); };
   }, [token]);
+
+  const ticking = bookings.some(b => b.holdExpiresAt && !b.cancelledAt && !b.paidAt && b.receipt?.status !== 'pending' && !paymentHoldExpired(b, clockNow));
+  useEffect(() => {
+    if (!ticking) return;
+    const timer = window.setInterval(() => setClockNow(Date.now() + serverOffset), 1000);
+    const sync = () => setClockNow(Date.now() + serverOffset);
+    window.addEventListener('focus', sync);
+    return () => { window.clearInterval(timer); window.removeEventListener('focus', sync); };
+  }, [ticking, serverOffset]);
+  const expiredKey = bookings.filter(b => paymentHoldExpired(b, clockNow)).map(b => b.id).join(',');
+  useEffect(() => {
+    let active = true, running = false;
+    const refresh = async () => {
+      if (running || document.visibilityState !== 'visible') return;
+      running = true;
+      try { const catalog = await api<{ sessions: PublicSession[] }>('/sessions'); if (active) setSessions(catalog.sessions); }
+      catch { /* A stale catalog cannot override the transactional booking check. */ }
+      finally { running = false; }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 30000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
+  }, [expiredKey]);
 
   const saveProfile = async (value: PlayerProfile) => {
     if (!token || busy || !canEditProfile) return;
@@ -167,9 +201,9 @@ export default function PlayerApp() {
       const headers = { Authorization: 'Bearer ' + idToken };
       const [me, own] = await Promise.all([
         api<{ name: string; profile: PlayerProfile }>('/me', { headers }),
-        api<{ bookings: BookingView[] }>('/bookings', { headers }),
+        api<OwnBookings>('/bookings', { headers }),
       ]);
-      setToken(idToken); setPerson(me.name); setProfile(me.profile); setBookings(own.bookings);
+      setToken(idToken); setPerson(me.name); setProfile(me.profile); setOwnBookings(own);
       setNeedsAuth(false);
     } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); }
     finally { setBusy(false); }
@@ -185,10 +219,10 @@ export default function PlayerApp() {
         body: JSON.stringify({ sessionId: selected.id }),
       });
       const [own, catalog] = await Promise.all([
-        api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } }),
+        api<OwnBookings>('/bookings', { headers: { Authorization: 'Bearer ' + token } }),
         api<{ sessions: PublicSession[] }>('/sessions'),
       ]);
-      setBookings(own.bookings); setSessions(catalog.sessions);
+      setOwnBookings(own); setSessions(catalog.sessions);
       setNotice(result.repeated ? 'คุณมีการจองก๊วนนี้อยู่แล้ว' : result.message);
       setSelectedId(null); setTab('tickets');
     } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); }
@@ -201,10 +235,10 @@ export default function PlayerApp() {
     try {
       await api((booking.kind === 'coaching' ? '/lessons/' : '/bookings/') + encodeURIComponent(booking.id) + '/cancel', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: '{}' });
       const [own, catalog] = await Promise.all([
-        api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } }),
+        api<OwnBookings>('/bookings', { headers: { Authorization: 'Bearer ' + token } }),
         api<{ sessions: PublicSession[] }>('/sessions'),
       ]);
-      setBookings(own.bookings); setSessions(catalog.sessions); setNotice('ยกเลิกการจองแล้ว ที่นั่งกลับมาเปิดรับ');
+      setOwnBookings(own); setSessions(catalog.sessions); setNotice('ยกเลิกการจองแล้ว ที่นั่งกลับมาเปิดรับ');
     } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); }
     finally { setBusy(false); }
   };
@@ -215,8 +249,8 @@ export default function PlayerApp() {
     setBusy(true); setError('');
     try {
       const submitted = await api<{ receipt: { verification?: import('../cloudflare/slipok').SlipVerification } }>((booking.kind === 'coaching' ? '/lessons/' : '/bookings/') + encodeURIComponent(booking.id) + '/receipt', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': file.type }, body: file });
-      const own = await api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } });
-      setBookings(own.bookings); setNotice(submitted.receipt?.verification?.status === 'verified' ? 'SlipOK ตรวจผ่านแล้ว รอแอดมินอนุมัติเงิน' : submitted.receipt?.verification?.status === 'rejected' ? 'ภาพส่งถึงระบบแล้ว แต่ SlipOK ไม่ผ่าน กรุณาดูเหตุผลในรายการจอง' : 'ภาพส่งถึงระบบแล้ว รอผู้จัดตรวจ ไม่ต้องโอนซ้ำ');
+      const own = await api<OwnBookings>('/bookings', { headers: { Authorization: 'Bearer ' + token } });
+      setOwnBookings(own); setNotice(submitted.receipt?.verification?.status === 'verified' ? 'SlipOK ตรวจผ่านแล้ว รอแอดมินอนุมัติเงิน' : submitted.receipt?.verification?.status === 'rejected' ? 'ภาพส่งถึงระบบแล้ว แต่ SlipOK ไม่ผ่าน กรุณาดูเหตุผลในรายการจอง' : 'ภาพส่งถึงระบบแล้ว รอผู้จัดตรวจ ไม่ต้องโอนซ้ำ');
     } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); }
     finally { setBusy(false); }
   };
@@ -278,13 +312,13 @@ export default function PlayerApp() {
         }) : <div className="pa-empty"><MapPinned size={28} /><b>ยังไม่มีสนามที่เปิดก๊วน</b><p>ก๊วนใหม่จะแสดงที่นี่เมื่อผู้จัดเปิดรับ</p></div>}</div>
       </>}
 
-      {tab === 'coaches' && <CoachPreview unauthorized={() => handleUnauthorized({status: 401})} token={token} login={login} booked={async () => { const own = await api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } }); setBookings(own.bookings); setNotice('จองเวลาเรียนแล้ว แนบสลิปและรอผู้จัดตรวจเงิน'); navigate('tickets'); }} />}
+      {tab === 'coaches' && <CoachPreview unauthorized={() => handleUnauthorized({status: 401})} token={token} login={login} booked={async () => { const own = await api<OwnBookings>('/bookings', { headers: { Authorization: 'Bearer ' + token } }); setOwnBookings(own); setNotice('จองเวลาเรียนแล้ว แนบสลิปและรอผู้จัดตรวจเงิน'); navigate('tickets'); }} />}
 
       {tab === 'tickets' && <>
         <div className="pa-page-intro"><span>MY COURT TIME</span><h1>การจองของฉัน<span>.</span></h1><p>{token ? 'ก๊วนที่ผูกกับบัญชี LINE ของคุณ' : 'เชื่อม LINE เพื่อดูการจองของตัวเอง'}</p></div>
         {!token ? <div className="pa-state-card"><span><LockKeyhole size={27} /></span><h2>การจองอยู่ในบัญชีของคุณ</h2><p>เมื่อเชื่อม LINE แล้ว จะแสดงเฉพาะก๊วนที่คุณจองไว้</p>{config.connected ? <button type="button" onClick={login}>เชื่อม LINE <ArrowRight size={17} /></button> : <small>LINE Mini App ยังไม่ได้ตั้งค่า</small>}</div> : bookings.length ? <div className="pa-ticket-list">{bookings.map(booking => {
           const session = sessions.find(item => item.id === booking.sessionId);
-          return <article className="pa-ticket" key={booking.id}><div className="pa-ticket-head"><span><Ticket size={16} /> {booking.kind === 'coaching' ? 'COACH PASS' : 'COURT PASS'}</span><span className={booking.admissionStatus === 'approved' ? 'paid' : ''}>{paymentTicketLabel(booking)}</span></div><div className="pa-ticket-main"><small>{booking.kind === 'coaching' && booking.startsAt ? new Date(booking.startsAt).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' }) : (session?.date || 'วันที่ก๊วน') + ' · ' + (session?.time || 'ดูรายละเอียดกับผู้จัด')}</small><h2>{booking.title}</h2><p><MapPin size={14} />{booking.venue || session?.venue || 'รายละเอียดสนาม'}</p></div><div className="pa-ticket-foot"><span>เลขจอง <b>{booking.id.slice(0, 8).toUpperCase()}</b></span><strong>฿{baht(booking.amount / 100)}</strong></div>{booking.cancelledAt && booking.stripe?.issue && <p className="pa-slip-note" role="alert">{booking.stripe.issue}</p>}{!booking.cancelledAt && !booking.paidAt && (booking.stripe && booking.stripe.status !== 'expired') && <StripeBookingPayment booking={booking} token={token} mode={booking.stripe?.mode || config.stripeMode} ready={Boolean(config.stripeConfigured)} refresh={async () => { const own = await api<{ bookings: BookingView[] }>('/bookings', { headers: { Authorization: 'Bearer ' + token } }); setBookings(own.bookings); }} />}{!booking.cancelledAt && !booking.paidAt && config.paymentProvider !== 'stripe' && (!booking.stripe || booking.stripe.status === 'expired') && <PlayerTransferInstructions account={booking.transferAccount} amount={booking.amount} slipok={Boolean(config.slipokConfigured)} pending={booking.receipt?.status === 'pending'} holdExpiresAt={booking.holdExpiresAt} openQr={async channel => { const result = await api<{ url: string }>("/payments/qr", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ kind: booking.kind || "game", id: booking.id, channel }) }); return result.url; }} />}{!booking.cancelledAt && <SlipVerificationStatus verification={booking.receipt?.verification} receiptStatus={booking.receipt?.status} />}{booking.receipt?.rejectReason && <p className="pa-slip-note" role="alert">แอดมินแจ้ง: {booking.receipt.rejectReason}</p>}{booking.receipt?.ocr.status === 'complete' && <details className="pa-slip-ocr"><summary>ข้อมูลที่ OCR อ่านได้ · กรุณาตรวจความถูกต้อง</summary><pre>{JSON.stringify(booking.receipt.ocr, null, 2)}</pre></details>}{booking.receipt?.ocr.status === 'failed' && <p className="pa-slip-note">OCR อ่านภาพไม่สำเร็จ แอดมินยังตรวจภาพสลิปได้</p>}{!booking.cancelledAt && !booking.paidAt && config.paymentProvider !== 'stripe' && (!booking.stripe || booking.stripe.status === 'expired') && booking.receipt?.status !== 'pending' && <label className="pa-slip-upload">{busy ? 'กำลังส่งสลิปและตรวจรายการ…' : booking.receipt?.status === 'rejected' ? 'ถ่ายรูปหรือเลือกสลิปใหม่' : 'ถ่ายรูปหรือแนบสลิปโอนเงิน'}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={event => { void uploadReceipt(booking, event.target.files?.[0]); event.target.value = ''; }} /></label>}{!booking.cancelledAt && !booking.paidAt && booking.receipt?.status !== 'pending' && (!booking.stripe || ['expired', 'test_paid'].includes(booking.stripe.status)) && booking.admissionStatus !== 'approved' && Date.parse(booking.startsAt || session?.startsAt || '') > Date.now() && <button type="button" className="pa-cancel-booking" disabled={busy} onClick={() => cancelBooking(booking)}>ยกเลิกการจอง</button>}</article>;
+          return <article className="pa-ticket" key={booking.id}><div className="pa-ticket-head"><span><Ticket size={16} /> {booking.kind === 'coaching' ? 'COACH PASS' : 'COURT PASS'}</span><span className={booking.admissionStatus === 'approved' ? 'paid' : ''}>{paymentTicketLabel(booking, clockNow)}</span></div><div className="pa-ticket-main"><small>{booking.kind === 'coaching' && booking.startsAt ? new Date(booking.startsAt).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' }) : (session?.date || 'วันที่ก๊วน') + ' · ' + (session?.time || 'ดูรายละเอียดกับผู้จัด')}</small><h2>{booking.title}</h2><p><MapPin size={14} />{booking.venue || session?.venue || 'รายละเอียดสนาม'}</p></div><div className="pa-ticket-foot"><span>เลขจอง <b>{booking.id.slice(0, 8).toUpperCase()}</b></span><strong>฿{baht(booking.amount / 100)}</strong></div><BookingHoldNotice booking={booking} now={clockNow} />{booking.cancelledAt && booking.stripe?.issue && <p className="pa-slip-note" role="alert">{booking.stripe.issue}</p>}{!booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && !booking.paidAt && (booking.stripe && booking.stripe.status !== 'expired') && <StripeBookingPayment booking={booking} token={token} mode={booking.stripe?.mode || config.stripeMode} ready={Boolean(config.stripeConfigured)} refresh={async () => { const own = await api<OwnBookings>('/bookings', { headers: { Authorization: 'Bearer ' + token } }); setOwnBookings(own); }} />}{!booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && !booking.paidAt && config.paymentProvider !== 'stripe' && (!booking.stripe || booking.stripe.status === 'expired') && <PlayerTransferInstructions account={booking.transferAccount} amount={booking.amount} slipok={Boolean(config.slipokConfigured)} pending={booking.receipt?.status === 'pending'} holdExpiresAt={booking.holdExpiresAt} openQr={async channel => { const result = await api<{ url: string }>("/payments/qr", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ kind: booking.kind || "game", id: booking.id, channel }) }); return result.url; }} />}{!booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && <SlipVerificationStatus verification={booking.receipt?.verification} receiptStatus={booking.receipt?.status} />}{booking.receipt?.rejectReason && <p className="pa-slip-note" role="alert">แอดมินแจ้ง: {booking.receipt.rejectReason}</p>}{booking.receipt?.ocr.status === 'complete' && <details className="pa-slip-ocr"><summary>ข้อมูลที่ OCR อ่านได้ · กรุณาตรวจความถูกต้อง</summary><pre>{JSON.stringify(booking.receipt.ocr, null, 2)}</pre></details>}{booking.receipt?.ocr.status === 'failed' && <p className="pa-slip-note">OCR อ่านภาพไม่สำเร็จ แอดมินยังตรวจภาพสลิปได้</p>}{!booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && !booking.paidAt && config.paymentProvider !== 'stripe' && (!booking.stripe || booking.stripe.status === 'expired') && booking.receipt?.status !== 'pending' && <label className="pa-slip-upload">{busy ? 'กำลังส่งสลิปและตรวจรายการ…' : booking.receipt?.status === 'rejected' ? 'ถ่ายรูปหรือเลือกสลิปใหม่' : 'ถ่ายรูปหรือแนบสลิปโอนเงิน'}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={event => { void uploadReceipt(booking, event.target.files?.[0]); event.target.value = ''; }} /></label>}{!booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && !booking.paidAt && booking.receipt?.status !== 'pending' && (!booking.stripe || ['expired', 'test_paid'].includes(booking.stripe.status)) && booking.admissionStatus !== 'approved' && Date.parse(booking.startsAt || session?.startsAt || '') > Date.now() && <button type="button" className="pa-cancel-booking" disabled={busy} onClick={() => cancelBooking(booking)}>ยกเลิกการจอง</button>}</article>;
         })}</div> : <div className="pa-empty"><Ticket size={28} /><b>ยังไม่มีการจอง</b><p>เริ่มจากเลือกก๊วนที่อยากไปเล่น</p><button type="button" onClick={() => navigate('discover')}>ไปหาก๊วน <ArrowRight size={15} /></button></div>}
       </>}
 
@@ -304,9 +338,9 @@ export default function PlayerApp() {
       ['coaches', GraduationCap, 'โค้ช'],
       ['tickets', Ticket, 'การจอง'],
       ['profile', UserRound, 'โปรไฟล์'],
-    ] as const).map(([id, Icon, label]) => <a href={'#view-' + id} key={id} className={tab === id ? 'active' : ''} aria-current={tab === id ? 'page' : undefined} onClick={event => { event.preventDefault(); navigate(id); }}><span className="pa-nav-icon"><Icon size={21} strokeWidth={tab === id ? 2.4 : 1.9} />{id === 'tickets' && bookings.some(booking => !booking.cancelledAt && booking.admissionStatus !== 'approved') && <span className="pa-nav-badge" aria-label="มีการจองรอยืนยัน">{bookings.filter(booking => !booking.cancelledAt && booking.admissionStatus !== 'approved').length}</span>}</span><span>{label}</span></a>)}</nav>
+    ] as const).map(([id, Icon, label]) => <a href={'#view-' + id} key={id} className={tab === id ? 'active' : ''} aria-current={tab === id ? 'page' : undefined} onClick={event => { event.preventDefault(); navigate(id); }}><span className="pa-nav-icon"><Icon size={21} strokeWidth={tab === id ? 2.4 : 1.9} />{id === 'tickets' && bookings.some(booking => !booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && booking.admissionStatus !== 'approved') && <span className="pa-nav-badge" aria-label="มีการจองรอยืนยัน">{bookings.filter(booking => !booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && booking.admissionStatus !== 'approved').length}</span>}</span><span>{label}</span></a>)}</nav>
 
-    {selected && <PlayerDialog label="รายละเอียดก๊วน" close={() => { setParticipantId(null); setSelectedId(null); }}><div className="pa-modal-art"><CourtArt /><img src="/chicken-court-3d.webp" alt="" /></div><span className="pa-modal-eyebrow"><Sparkles size={14} /> YOUR NEXT GOOD GAME</span><h2>{selected.title}</h2><p className="pa-modal-place"><MapPin size={16} />{selected.venue} · {selected.area}</p><div className="pa-modal-facts"><span><CalendarDays size={18} /><b>{selected.date}</b><small>{selected.time}</small></span><span><UsersRound size={18} /><b>{selected.joined}/{selected.capacity}</b><small>จองแล้ว</small></span><span><CircleDot size={18} /><b>{selected.courtCount} คอร์ท</b><small>{selected.dupr}</small></span></div><ParticipantPreview session={selected} full openProfile={person => setParticipantId(person.id)} /><div className="pa-modal-host"><span><UserRound size={17} /></span><div><small>ดูแลก๊วนโดย</small><b>{selected.host}</b></div><em>{selected.vibe}</em></div>{profile && <label className="pa-visibility pa-join-visibility"><input type="checkbox" role="switch" checked={profile.discoverable} disabled={busy || !canEditProfile} onChange={event => void saveProfile({ ...profile, discoverable: event.target.checked })} /><span><b>แสดงโปรไฟล์ของฉันเมื่อผู้จัดรับเข้าสนาม</b><small>ชื่อ รูป ระดับ และคำแนะนำตัวจะแสดงหลังผู้จัดรับเข้าสนาม ปิดได้ทุกเมื่อที่หน้าโปรไฟล์</small></span></label>}{error && <p className="pa-message pa-error" role="alert">{error}</p>}<div className="pa-modal-foot"><div><small>ค่าร่วมก๊วน / คน</small><strong>฿{baht(selected.price)}</strong></div>{!config.bookingEnabled ? <button type="button" disabled>ยังไม่เปิดจองผ่าน LINE</button> : token ? <button type="button" disabled={busy || selected.status !== 'open'} onClick={reserve}>{busy ? 'กำลังบันทึก…' : selected.status === 'full' ? 'ก๊วนเต็มแล้ว' : config.pilot ? 'ขอร่วมก๊วน' : 'จองทดลอง'}<ArrowRight size={17} /></button> : <button type="button" onClick={login}>เชื่อม LINE ก่อนจอง <ArrowRight size={16} /></button>}</div><p className="pa-modal-note"><Info size={13} />{config.pilot ? config.paymentProvider === "stripe" ? "ชำระด้วย PromptPay QR ผ่าน Stripe แล้วรอผู้จัดเลือกรายชื่อเข้าสนาม" : "ผู้จัดตรวจสลิปและเลือกรายชื่อเข้าสนาม โปรดรอการยืนยัน" : "ยังไม่มีการเรียกเก็บเงินจริง"}</p></PlayerDialog>}
+    {selected && <PlayerDialog label="รายละเอียดก๊วน" close={() => { setParticipantId(null); setSelectedId(null); }}><div className="pa-modal-art"><CourtArt /><img src="/chicken-court-3d.webp" alt="" /></div><span className="pa-modal-eyebrow"><Sparkles size={14} /> YOUR NEXT GOOD GAME</span><h2>{selected.title}</h2><p className="pa-modal-place"><MapPin size={16} />{selected.venue} · {selected.area}</p><div className="pa-modal-facts"><span><CalendarDays size={18} /><b>{selected.date}</b><small>{selected.time}</small></span><span><UsersRound size={18} /><b>{selected.joined}/{selected.capacity}</b><small>จองแล้ว</small></span><span><CircleDot size={18} /><b>{selected.courtCount} คอร์ท</b><small>{selected.dupr}</small></span></div><ParticipantPreview session={selected} full openProfile={person => setParticipantId(person.id)} /><div className="pa-modal-host"><span><UserRound size={17} /></span><div><small>ดูแลก๊วนโดย</small><b>{selected.host}</b></div><em>{selected.vibe}</em></div>{profile && <label className="pa-visibility pa-join-visibility"><input type="checkbox" role="switch" checked={profile.discoverable} disabled={busy || !canEditProfile} onChange={event => void saveProfile({ ...profile, discoverable: event.target.checked })} /><span><b>แสดงโปรไฟล์ของฉันเมื่อผู้จัดรับเข้าสนาม</b><small>ชื่อ รูป ระดับ และคำแนะนำตัวจะแสดงหลังผู้จัดรับเข้าสนาม ปิดได้ทุกเมื่อที่หน้าโปรไฟล์</small></span></label>}{error && <p className="pa-message pa-error" role="alert">{error}</p>}<div className="pa-modal-foot"><div><small>ค่าร่วมก๊วน / คน</small><strong>฿{baht(selected.price)}</strong></div>{!config.bookingEnabled ? <button type="button" disabled>ยังไม่เปิดจองผ่าน LINE</button> : token ? <button type="button" disabled={busy || selected.status !== 'open'} onClick={reserve}>{busy ? 'กำลังบันทึก…' : selected.status === 'full' ? 'ก๊วนเต็มแล้ว' : config.pilot ? 'ขอร่วมก๊วน' : 'จองทดลอง'}<ArrowRight size={17} /></button> : <button type="button" onClick={login}>เชื่อม LINE ก่อนจอง <ArrowRight size={16} /></button>}</div><p className="pa-modal-note"><Info size={13} />{config.pilot ? config.paymentProvider === "stripe" ? "ชำระด้วย PromptPay QR ผ่าน Stripe แล้วรอผู้จัดเลือกรายชื่อเข้าสนาม" : "ถือที่นั่ง 5 นาทีหลังจอง · โอนและส่งสลิปให้ทันเวลา จากนั้นรอผู้จัดตรวจและเลือกเข้าสนาม" : "ยังไม่มีการเรียกเก็บเงินจริง"}</p></PlayerDialog>}
     {participant && <ParticipantDialog person={participant} close={closeParticipant} />}
   </div>;
 }

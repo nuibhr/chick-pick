@@ -1,9 +1,11 @@
 import type { ReceiptSubmission } from './marketplaceTypes';
 import type { StripePayment } from './paymentTypes';
+import { paymentHoldExpired } from './bookingHold';
 
-type Ticket = { cancelledAt?: string | null; paidAt?: string | null; kind?: string; completed?: boolean; admissionStatus?: string; stripe?: Pick<StripePayment, 'status'> | null; receipt?: Pick<ReceiptSubmission, 'status' | 'verification'> | null };
-export function paymentTicketLabel(ticket: Ticket) {
+type Ticket = { holdExpiresAt?: string | null; holdExpired?: boolean; cancelledAt?: string | null; paidAt?: string | null; kind?: string; completed?: boolean; admissionStatus?: string; stripe?: Pick<StripePayment, 'status'> | null; receipt?: Pick<ReceiptSubmission, 'status' | 'verification'> | null };
+export function paymentTicketLabel(ticket: Ticket, now = Date.now()) {
   if (ticket.cancelledAt) return 'ยกเลิกแล้ว';
+  if (paymentHoldExpired(ticket, now)) return 'หมดเวลาถือที่นั่ง';
   if (ticket.paidAt) return ticket.kind === 'coaching' ? ticket.completed ? 'เรียนจบแล้ว' : 'รับเงินแล้ว · ยืนยันนัดเรียน' : ticket.admissionStatus === 'approved' ? 'ผู้จัดรับเข้าสนามแล้ว' : 'รับเงินแล้ว · รอผู้จัดเลือกเข้าสนาม';
   if (ticket.receipt?.status === 'rejected') return 'ผู้จัดขอให้ส่งสลิปใหม่';
   if (ticket.receipt?.status === 'pending') {

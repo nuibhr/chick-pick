@@ -14,7 +14,70 @@ import { createQrTicket } from './paymentQr';
 import { PNG } from 'pngjs';
 import jsQR from 'jsqr';
 import generatePayload from 'promptpay-qr';
+import { activeBooking } from '../src/marketplaceTypes';
+import { publicSession } from './tidbPreview';
 const stripeAudit = { actorId: 'test', actorType: 'admin' as const, action: 'test.stripe', entityId: 'fixture' };
+
+test('five-minute holds do not extend on retry; expired last seat reopens for exactly one concurrent buyer', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  for (const who of ['a', 'b', 'c', 'd']) assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who))).status, 201);
+  const row = f.data.bookings.at(-1)!, deadline = row.holdExpiresAt!;
+  assert.equal(Date.parse(deadline) - Date.parse(row.createdAt), 300000);
+  assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('d'))).status, 200);
+  assert.equal(f.data.bookings.at(-1)!.holdExpiresAt, deadline);
+  assert.equal(publicSession(f.data.sessions[0], f.data.bookings).status, 'full');
+  f.data.bookings.find(b => b.id === row.id)!.holdExpiresAt = new Date(Date.now() - 1).toISOString();
+  assert.equal(publicSession(f.data.sessions[0], f.data.bookings).joined, 3);
+  const candidates = await Promise.all(['e', 'g', 'h'].map(who => f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who))));
+  assert.deepEqual(candidates.map(r => r.status).sort(), [201, 409, 409]);
+  assert.equal(f.data.bookings.filter(activeBooking).length, 4); assert.equal(f.data.bookings.length, 5);
+  const finance = await (await f.request('/api/finance/report', undefined, owner)).json();
+  assert.equal(finance.rows.find((r: any) => r.id === 'booking_' + row.id).status, 'void'); assert.equal(finance.summary.income, 0);
+});
+
+test('expired booking cannot upload or mint/reuse QR, while the same player can reserve a new seat', async t => {
+  const f = fixture(t), owner = await f.signIn(); f.docs.set('worker-pilot', { bookingEnabled: true });
+  await f.request('/api/marketplace/setup/transfer-channels', { channels: [{ id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'Fixture', accountNumber: '0812345678' }] }, owner);
+  const old = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
+  const qrBody = { kind: 'game', id: old, channel: 'promptpay' };
+  const qr = await (await f.request('/api/player/payments/qr', qrBody, f.player('a'))).json();
+  f.data.bookings[0].holdExpiresAt = new Date(Date.now() - 1).toISOString();
+  assert.equal((await f.request('/api/player/payments/qr', qrBody, f.player('a'))).status, 410);
+  const url = new URL(qr.url); assert.equal((await f.request(url.pathname + url.search)).status, 410);
+  assert.equal((await f.request(url.pathname.replace('/view', '/image') + url.search)).status, 410);
+  const upload = await pilotRequest(new Request(`https://example.com/api/player/bookings/${old}/receipt`, { method: 'POST', headers: { ...f.player('a'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,1]) }), f.env, f.verify);
+  assert.equal(upload!.status, 410); assert.equal(f.images.size, 0); assert.match((await upload!.json()).message, /อย่าโอนซ้ำ/);
+  const fresh = await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'));
+  assert.equal(fresh.status, 201); assert.notEqual((await fresh.json()).booking.id, old); assert.equal(f.data.bookings.filter(activeBooking).length, 1);
+});
+
+test('receipt committed before deadline retains the last seat throughout delayed admin review', async t => {
+  const f = fixture(t); await f.signIn(); f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  for (const who of ['a', 'b', 'c', 'd']) await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who));
+  const row = f.data.bookings.at(-1)!;
+  const upload = await pilotRequest(new Request(`https://example.com/api/player/bookings/${row.id}/receipt`, { method: 'POST', headers: { ...f.player('d'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,1]) }), f.env, f.verify);
+  assert.equal(upload!.status, 201);
+  f.data.bookings.at(-1)!.holdExpiresAt = new Date(Date.now() - 1).toISOString();
+  assert.equal(publicSession(f.data.sessions[0], f.data.bookings).joined, 4);
+  assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('e'))).status, 409);
+  assert.equal(f.data.bookings.at(-1)!.receipts![0].status, 'pending'); assert.equal(f.data.bookings.at(-1)!.paidAt, undefined);
+});
+
+test('expiry during image storage is rechecked under the same booking lock; late upload cannot reclaim sold seat', async t => {
+  const f = fixture(t); await f.signIn(); f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  for (const who of ['a', 'b', 'c', 'd']) await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who));
+  const row = f.data.bookings.at(-1)!;
+  let release!: () => void, entered!: () => void;
+  const storageGate = new Promise<void>(r => { release = r; }), storageEntered = new Promise<void>(r => { entered = r; });
+  t.mock.method(f.env.RECEIPTS!, 'put', async (key: string, value: ArrayBuffer) => { f.images.set(key, value); entered(); await storageGate; });
+  const uploading = pilotRequest(new Request(`https://example.com/api/player/bookings/${row.id}/receipt`, { method: 'POST', headers: { ...f.player('d'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,1]) }), f.env, f.verify);
+  await storageEntered;
+  f.data.bookings.at(-1)!.holdExpiresAt = new Date(Date.now() - 1).toISOString();
+  assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('e'))).status, 201);
+  release(); assert.equal((await uploading)!.status, 410);
+  assert.equal(f.images.size, 0); assert.equal(f.data.bookings.find(b => b.id === row.id)!.receipts, undefined); assert.equal(f.data.bookings.filter(activeBooking).length, 4);
+});
 
 test('admin repairs only currency parser failures from the same hashed image and still rejects reused transfers', async t => {
   const f = fixture(t), owner = await f.signIn();

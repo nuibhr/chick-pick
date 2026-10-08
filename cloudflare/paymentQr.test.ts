@@ -58,3 +58,14 @@ test('QR export shares a real PNG file when available, handles cancellation and 
   assert.equal(await saveQrImage(image, 'test.png', { canShare: () => true, share: async () => { throw new DOMException('Blocked', 'NotAllowedError'); }, download: () => { downloads++; } }), 'unavailable');
   assert.equal(await saveQrImage(image, 'test.png', { download: () => { downloads++; } }), 'download-started'); assert.equal(downloads, 1);
 });
+
+test('opening another QR never extends the original seat hold deadline', async () => {
+  const secret = 'fixture-qr', now = Date.now(), deadline = new Date(now + 120000).toISOString();
+  const claim = { kind: 'game' as const, id: 'fixture', channel: 'promptpay' };
+  for (const issuedAt of [now, now + 119000]) {
+    const ticket = await createQrTicket(secret, claim, issuedAt, deadline);
+    assert.equal((await readQrTicket(secret, ticket, issuedAt))!.exp, Date.parse(deadline));
+    assert.equal(await readQrTicket(secret, ticket, Date.parse(deadline)), null);
+    assert.match(paymentQrPage(ticket, 'Fixture', 19000, false, deadline), /การเปิด QR ไม่ต่อเวลาจอง/);
+  }
+});

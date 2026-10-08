@@ -10,6 +10,8 @@ Owner-configurable bank and phone PromptPay channels support separate recipients
 
 ## Run locally
 
+New Open Play transfer bookings now hold one seat for five minutes. Pending uploaded slips retain the seat for admin review, and expired unpaid holds release capacity without entering pending revenue. Existing bookings are preserved. See [hold rules, concurrency tests and remaining mobile check](OPEN-PLAY-HOLD-2026-10-08.md).
+
 Requires Node.js 22 or newer.
 
 ```sh

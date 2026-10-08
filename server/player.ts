@@ -2,6 +2,7 @@ import { Router, raw, type NextFunction, type Request, type RequestHandler, type
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { activeBooking, type Booking, type MarketplaceData, type ReceiptSubmission, type Session } from '../src/marketplaceTypes';
+import { OPEN_PLAY_HOLD_MS, paymentHoldExpired, expiredHoldMessage } from '../src/bookingHold';
 import { thaiDate } from './finance';
 import { maxReceiptBytes, validReceiptImage } from './receiptFiles';
 import { readSlipOcr } from './slipOcr';
@@ -58,7 +59,7 @@ export function playerRouter(source: string | MarketplaceStore = path.resolve('d
   }));
   router.get('/bookings', identity, route(async (_req, res) => {
     const id = (res.locals.line as LineIdentity).sub; const data = await store.read();
-    return res.json({ bookings: data.bookings.filter(b => b.playerId === `line:${id}`).map(b => ({ id: b.id, sessionId: b.sessionId, amount: b.amount, title: b.title, transferAccount: b.transferAccount || null, createdAt: b.createdAt, paidAt: b.paidAt || null, admissionStatus: b.admissionStatus || 'pending', cancelledAt: b.cancelledAt || null, receipt: b.receipts?.at(-1) ? { id: b.receipts.at(-1)!.id, status: b.receipts.at(-1)!.status, ocr: b.receipts.at(-1)!.ocr, rejectReason: b.receipts.at(-1)!.rejectReason || null } : null })) });
+    return res.json({ bookings: data.bookings.filter(b => b.playerId === `line:${id}`).map(b => ({ id: b.id, sessionId: b.sessionId, amount: b.amount, title: b.title, transferAccount: b.transferAccount || null, createdAt: b.createdAt, holdExpiresAt: b.holdExpiresAt || null, holdExpired: paymentHoldExpired(b), paidAt: b.paidAt || null, admissionStatus: b.admissionStatus || 'pending', cancelledAt: b.cancelledAt || null, receipt: b.receipts?.at(-1) ? { id: b.receipts.at(-1)!.id, status: b.receipts.at(-1)!.status, ocr: b.receipts.at(-1)!.ocr, rejectReason: b.receipts.at(-1)!.rejectReason || null } : null })), serverNow: Date.now() });
   }));
   router.post('/bookings', identity, route(async (req, res) => {
     const sessionId = req.body?.sessionId;
@@ -71,7 +72,7 @@ export function playerRouter(source: string | MarketplaceStore = path.resolve('d
       const existing = data.bookings.find(b => b.sessionId === sessionId && b.playerId === playerId && activeBooking(b));
       if (existing) return { booking: existing, repeated: true };
       if (session.status === 'completed' || !Number.isFinite(Date.parse(session.startsAt)) || Date.parse(session.startsAt) <= Date.now() || data.bookings.filter(b => b.sessionId === sessionId && activeBooking(b)).length >= session.capacity) reject(409, 'ก๊วนนี้ปิดรับหรือเต็มแล้ว');
-      const booking: Booking = { id: randomUUID(), sessionId, playerId, playerName: person.name, amount: Math.round(session.price * 100), title: session.title, createdAt: new Date().toISOString(), admissionStatus: 'pending', transferAccount: transferAccount || undefined };
+      const booking: Booking = { id: randomUUID(), sessionId, playerId, playerName: person.name, amount: Math.round(session.price * 100), title: session.title, createdAt: new Date().toISOString(), holdExpiresAt: new Date(Date.now() + OPEN_PLAY_HOLD_MS).toISOString(), admissionStatus: 'pending', transferAccount: transferAccount || undefined };
       data.bookings.push(booking); return { booking, repeated: false };
     });
     if (!result.repeated) await store.audit({ actorType: 'line', actorId: person.sub, action: 'booking.created', entityType: 'booking', entityId: result.booking.id, details: { sessionId } });
@@ -88,6 +89,7 @@ export function playerRouter(source: string | MarketplaceStore = path.resolve('d
       await store.update(data => {
         const booking = data.bookings.find(b => b.id === req.params.id && b.playerId === `line:${person.sub}`);
         if (!booking) reject(404, 'ไม่พบการจองของคุณ');
+        if (paymentHoldExpired(booking)) reject(410, expiredHoldMessage);
         if (booking.cancelledAt || booking.paidAt) reject(409, 'รายการนี้ปิดรับสลิปแล้ว');
         if (booking.receipts?.at(-1)?.status === 'pending') reject(409, 'ส่งสลิปแล้ว กรุณารอแอดมินตรวจสอบ');
         if (data.bookings.some(b => b.id !== booking.id && b.receipts?.some(r => r.sha256 === sha256 && r.status !== 'rejected'))) reject(409, 'ภาพสลิปนี้ถูกส่งกับการจองอื่นแล้ว กรุณาตรวจสอบรายการ');

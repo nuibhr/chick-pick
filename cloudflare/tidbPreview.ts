@@ -1,4 +1,5 @@
 import type { Booking, MemberProfile, Session } from '../src/marketplaceTypes';
+import { activeBooking, bookingHoldExpired } from '../src/marketplaceTypes';
 import { stripePublicView } from '../src/paymentTypes';
 import { stripeReadiness } from './stripePayments';
 import type { StripeEnv } from './stripePayments';
@@ -73,7 +74,7 @@ async function playerIdentity(request: Request, channelId: string | undefined): 
 }
 
 export function publicSession(session: Session, bookings: Booking[], profiles: MemberProfile[] = []) {
-  const active = bookings.filter(booking => booking.sessionId === session.id && !booking.cancelledAt);
+  const active = bookings.filter(booking => booking.sessionId === session.id && activeBooking(booking));
   const startsAt = Date.parse(session.startsAt);
   const upcoming = session.status !== 'completed' && Number.isFinite(startsAt) && startsAt > Date.now();
   const status = !upcoming ? 'completed' : active.length >= session.capacity ? 'full' : 'open';
@@ -167,11 +168,12 @@ export default {
               transferAccount: publicTransferAccount(booking.transferAccount), createdAt: booking.createdAt,
               paidAt: booking.paidAt || null, admissionStatus: booking.admissionStatus || 'pending',
               cancelledAt: booking.cancelledAt || null,
+              holdExpiresAt: booking.holdExpiresAt || null, holdExpired: bookingHoldExpired(booking),
               stripe: stripePublicView(booking.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null,
             };
           });
           const coaching = (await new TidbDocuments(env.TIDB_DATABASE_URL).readDocument<import('../src/coachingTypes').Enrollment[]>('coaching', [])).filter(e => e.playerId === `line:${identity.sub}`).map(lessonView);
-          return json({ bookings: [...bookings.map(b => ({ ...b, kind: 'game' })), ...coaching] });
+          return json({ bookings: [...bookings.map(b => ({ ...b, kind: 'game' })), ...coaching], serverNow: Date.now() });
         }
         return json({ sessions: data.sessions.map(session => publicSession(session, data.bookings, data.profiles)) });
       } catch (error) {

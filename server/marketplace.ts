@@ -80,7 +80,7 @@ export function marketplaceRouter(source: string | MarketplaceStore = path.resol
     const result = await store.update(data => {
       const booking = data.bookings.find(b => b.id === req.params.id);
       if (!booking) reject(404, 'ไม่พบการจองนี้');
-      if (booking.cancelledAt) reject(409, 'รายการนี้ยกเลิกแล้ว ไม่สามารถยืนยันรับเงินได้');
+      if (!activeBooking(booking)) reject(409, 'รายการนี้ยกเลิกหรือหมดเวลาถือที่นั่งแล้ว ไม่สามารถยืนยันรับเงินได้');
       if (booking.paidAt) return { booking, repeated: true };
       if (booking.receipts?.at(-1)?.status === 'pending') reject(409, 'มีสลิปรอตรวจ กรุณาตรวจสลิปก่อน');
       booking.paidAt = new Date().toISOString(); booking.paymentMethod = 'cash'; return { booking, repeated: false };

@@ -17,6 +17,7 @@ import { configuredChannels, parsePaymentChannels, transferOptions, type Transfe
 import { createQrTicket, readQrTicket, paymentQrPayload, paymentQrPng, paymentQrPage } from './paymentQr';
 import { paymentQrPhone } from '../src/paymentChannels';
 import { stripeLocksPayment } from '../src/paymentTypes';
+import { expiredHoldMessage, paymentHoldExpired } from '../src/bookingHold';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
 export type PilotEnv = StripeEnv & SlipOkEnv & { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
@@ -78,17 +79,17 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       }
       const row = paymentRow(await db.readFinance(), claims.kind, claims.id);
       if (row.cancelledAt || row.paidAt || row.receipts?.at(-1)?.status === 'pending' || stripeLocksPayment(row.stripe)) fail(409, 'รายการนี้ไม่เปิด QR สำหรับการโอนซ้ำ');
-      if ('holdExpiresAt' in row && row.holdExpiresAt && Date.parse(row.holdExpiresAt) <= Date.now()) fail(410, 'เวลาจองหมดแล้ว');
+      if (paymentHoldExpired(row)) fail(410, expiredHoldMessage);
       const account = transferOptions(row.transferAccount).find(c => (c.kind || 'bank') === claims.channel);
       if (!account) fail(404, 'ช่องทางนี้ไม่ได้อยู่ในการจอง');
       const amount = claims.kind === 'game' ? row.amount : Math.round(row.amount * 100);
       let payload: string; try { payload = paymentQrPayload(account, amount); } catch { return fail(409, 'ยังไม่ได้เพิ่ม QR รับเงินของธนาคารสำหรับการจองนี้ ใช้เลขบัญชีที่แสดง'); }
       if (path === '/api/player/payments/qr') {
-        const ticket = await createQrTicket(env.ADMIN_SESSION_SECRET, claims);
+        const ticket = await createQrTicket(env.ADMIN_SESSION_SECRET, claims, Date.now(), row.holdExpiresAt);
         return json({ url: new URL('/api/player/payments/qr/view?ticket=' + ticket, request.url).href });
       }
       const headers = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' };
-      if (path.endsWith('/view')) return new Response(paymentQrPage(new URL(request.url).searchParams.get('ticket')!, account.accountName, amount, !paymentQrPhone(account)), { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" } });
+      if (path.endsWith('/view')) return new Response(paymentQrPage(new URL(request.url).searchParams.get('ticket')!, account.accountName, amount, !paymentQrPhone(account), row.holdExpiresAt), { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" } });
       return new Response(await paymentQrPng(payload), { headers: { ...headers, 'Content-Type': 'image/png', 'Content-Disposition': (new URL(request.url).searchParams.get('download') === '1' ? 'attachment' : 'inline') + '; filename="chick-pick-payment-qr.png"' } });
     }
     if (path === '/api/stripe/webhook') {
@@ -176,7 +177,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
         const settings = await db.readDocument<{ paymentProvider?: 'manual' | 'stripe' }>('worker-pilot', {});
         if (!owner.sub || !env.ADMIN_SESSION_SECRET || !env.RECEIPTS) fail(503, 'ผู้จัดยังไม่พร้อมรับจอง');
         const result = await db.updateMarketplace((data, ctx) => book(data, { ...ctx, paymentProvider: 'manual' }, actor, v.sessionId as string), audit(actor, 'booking.requested', String(v.sessionId)), true);
-        return json({ booking: { id: result.id }, repeated: result.repeated, message: 'จองแล้ว กรุณาส่งสลิปและรอผู้จัดเลือกเข้าสนาม' }, result.repeated ? 200 : 201);
+        return json({ booking: { id: result.id }, repeated: result.repeated, message: 'ถือที่นั่งให้ 5 นาที · โอนและส่งสลิปให้ถึงระบบก่อนหมดเวลา' }, result.repeated ? 200 : 201);
       }
       const match = path.match(/^\/api\/player\/bookings\/([^/]+)\/(receipt|cancel)$/)!; const id = decodeURIComponent(match[1]);
       if (match[2] === 'cancel') return json(await db.updateMarketplace(data => cancel(data, actor, id), audit(actor, 'booking.cancelled', id), true));

@@ -2,8 +2,10 @@ export type Session = { id: string; title: string; venue: string; venueId?: stri
 export type SlipOcr = { status: 'unavailable' | 'complete' | 'failed'; amount: number | null; transferredAt: string | null; reference: string | null; sender: string | null; receiver: string | null; rawText: string | null; confidence: number | null };
 export type ReceiptSubmission = { id: string; fileName: string; mimeType: 'image/jpeg' | 'image/png' | 'image/webp'; size: number; sha256?: string; submittedAt: string; status: 'pending' | 'approved' | 'rejected'; ocr: SlipOcr; verification?: import('../cloudflare/slipok').SlipVerification; reviewedAt?: string; rejectReason?: string; verifiedTransferReference?: string; verifiedAmount?: number };
 export type TransferAccount = { bankName: string; accountName: string; accountNumber: string; kind?: 'bank' | 'promptpay'; id?: string; bankQrPayload?: string; bankPromptPayPhone?: string; linkedBank?: { bankName: string; accountNumber: string }; alternatives?: TransferAccount[] };
-export type Booking = { id: string; sessionId: string; playerId: string; playerName: string; amount: number; createdAt: string; title: string; paidAt?: string; paymentMethod?: 'cash' | 'transfer'; admissionStatus?: 'approved' | 'pending'; admissionUpdatedAt?: string; cancelledAt?: string; cancelledBy?: 'player' | 'organizer'; receipts?: ReceiptSubmission[]; transferAccount?: TransferAccount; stripe?: import('./paymentTypes').StripePayment };
-export const activeBooking = (booking: Booking) => !booking.cancelledAt;
+export type Booking = { id: string; sessionId: string; playerId: string; playerName: string; amount: number; createdAt: string; holdExpiresAt?: string; title: string; paidAt?: string; paymentMethod?: 'cash' | 'transfer'; admissionStatus?: 'approved' | 'pending'; admissionUpdatedAt?: string; cancelledAt?: string; cancelledBy?: 'player' | 'organizer'; receipts?: ReceiptSubmission[]; transferAccount?: TransferAccount; stripe?: import('./paymentTypes').StripePayment };
+import { paymentHoldExpired } from './bookingHold';
+export const bookingHoldExpired = (booking: Booking) => paymentHoldExpired(booking);
+export const activeBooking = (booking: Booking) => !booking.cancelledAt && !bookingHoldExpired(booking);
 export const admittedBooking = (booking: Booking) => activeBooking(booking) && booking.admissionStatus === 'approved';
 export type PublicParticipant = { id: string; name: string; picture: string | null; skill: number | null; bio: string };
 export type PlayerProfile = PublicParticipant & { discoverable: boolean };
