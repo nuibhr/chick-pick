@@ -1,5 +1,5 @@
 import type { ReceiptSubmission, TransferAccount } from '../src/marketplaceTypes';
-import { transferOptions, channelLabel } from '../src/paymentChannels';
+import { transferOptions, channelLabel, paymentChannelId, type PaymentChannelId } from '../src/paymentChannels';
 
 export type SlipOkEnv = { SLIPOK_API_KEY?: string; SLIPOK_BRANCH_ID?: string };
 export type SlipVerification = {
@@ -8,6 +8,7 @@ export type SlipVerification = {
   transferredAt?: string; receiver?: string; attemptId?: string; retryAt?: string; paymentChannel?: 'bank' | 'promptpay'; paymentChannelLabel?: string;
   currencyRecovery?: true;
   receiverRecovery?: true;
+  paymentChannelId?: PaymentChannelId;
 };
 export const slipokConfigured = (env: SlipOkEnv) => Boolean(env.SLIPOK_API_KEY && !/[\s\x00-\x1f]/.test(env.SLIPOK_API_KEY) && /^\d{1,10}$/.test(env.SLIPOK_BRANCH_ID || ''));
 export type SlipOkConnection = { configured: boolean; connected: boolean; quota: number | null; overQuota?: number | null; message: string; checkedAt: string; diagnostic?: string; upstreamStatus?: number | null };
@@ -70,11 +71,16 @@ export function matchesSlipMobile(masked: unknown, number: string) {
 function receiverChannel(receiver: Record<string, unknown>, receivingBank: string, sendingBank: string, account: TransferAccount) {
   const bankMatches = (name: string) => banks[receivingBank]?.some(alias => bankName(alias) === bankName(name));
   const bankAccount = object(receiver.account), proxy = object(receiver.proxy);
-  return transferOptions(account).find(channel => {
+  const options = transferOptions(account);
+  // A matching registered proxy identifies the PromptPay route before a
+  // direct-bank alternative that happens to receive into the same account.
+  const preferred = options.filter(c => c.kind === 'promptpay' && proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, c.accountNumber));
+  return [...preferred, ...options.filter(c => !preferred.includes(c))].find(channel => {
     if (channel.kind === 'promptpay') {
       // SCB can return only the receiving mobile, with an empty bank/account.
-      if (!receivingBank) return Boolean(banks[sendingBank]) && proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, channel.accountNumber);
+      if (!receivingBank) return Boolean(banks[sendingBank]) && !short(bankAccount.value) && proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, channel.accountNumber);
       if (!banks[receivingBank] || channel.linkedBank && !bankMatches(channel.linkedBank.bankName)) return false;
+      if (channel.id === 'bank-promptpay' && channel.linkedBank && bankAccount.type === 'BANKAC' && short(bankAccount.value) && !matchesSlipAccount(bankAccount.value, channel.linkedBank.accountNumber)) return false;
       return proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, channel.accountNumber)
         || Boolean(channel.linkedBank && bankAccount.type === 'BANKAC' && matchesSlipAccount(bankAccount.value, channel.linkedBank.accountNumber));
     }
@@ -123,7 +129,7 @@ export function slipokResult(payload: unknown, httpOk: boolean, expectedSatang: 
   const transferredAt = /^\d{8}$/.test(date) && /^\d{2}:\d{2}:\d{2}$/.test(time) ? `${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}T${time}+07:00` : '';
   const timestamp = Date.parse(transferredAt), bookingTime = Date.parse(bookedAt);
   if (!Number.isFinite(timestamp) || !Number.isFinite(bookingTime) || timestamp < bookingTime - 5 * 60000 || timestamp > now + 5 * 60000 || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(timestamp)).replaceAll('-', '') !== date) return reject('เวลารายการโอนไม่อยู่ในช่วงของการจองนี้ กรุณาติดต่อผู้จัด');
-  return { provider: 'slipok', status: 'verified', checkedAt, message: 'SlipOK ยืนยันรายการ ยอด และบัญชีผู้รับตรงแล้ว รอแอดมินอนุมัติ', reference, amountSatang: expectedSatang, transferredAt: new Date(timestamp).toISOString(), receiver: short(receiver.displayName) || short(receiver.name), paymentChannel: matched.kind || 'bank', paymentChannelLabel: channelLabel(matched) };
+  return { provider: 'slipok', status: 'verified', checkedAt, message: 'SlipOK ยืนยันรายการ ยอด และบัญชีผู้รับตรงแล้ว รอแอดมินอนุมัติ', reference, amountSatang: expectedSatang, transferredAt: new Date(timestamp).toISOString(), receiver: short(receiver.displayName) || short(receiver.name), paymentChannel: matched.kind || 'bank', paymentChannelId: paymentChannelId(matched), paymentChannelLabel: channelLabel(matched) };
 }
 
 export async function verifySlipOk(env: SlipOkEnv, image: ArrayBuffer, mimeType: ReceiptSubmission['mimeType'], amount: number, account: TransferAccount, bookedAt: string, transport: typeof fetch = fetch, parserRecovery = false): Promise<SlipVerification> {

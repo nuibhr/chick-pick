@@ -13,7 +13,7 @@ import type { Venue } from '../src/venueTypes';
 import { paymentRow, syncPayment, stripeReadiness, stripeWebhook, type StripeEnv } from './stripePayments';
 import { checkSlipOkConnection, slipokConfigured, type SlipOkEnv } from './slipok';
 import { checkStoredReceipt } from './slipokReceipts';
-import { configuredChannels, parsePaymentChannels, transferOptions, type TransferSettings } from '../src/paymentChannels';
+import { configuredChannels, parsePaymentChannels, transferOptions, paymentChannelId, validPaymentChannelId, type TransferSettings } from '../src/paymentChannels';
 import { createQrTicket, readQrTicket, paymentQrPayload, paymentQrPng, paymentQrPage } from './paymentQr';
 import { paymentQrPhone } from '../src/paymentChannels';
 import { stripeLocksPayment } from '../src/paymentTypes';
@@ -69,7 +69,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       if (path === '/api/player/payments/qr') {
         if (request.method !== 'POST') fail(405, 'ใช้ POST');
         const actor = await identity(request, env, verify), v = await body(request);
-        if (!['game', 'coaching'].includes(String(v.kind)) || typeof v.id !== 'string' || !['bank', 'promptpay'].includes(String(v.channel))) fail(400, 'เลือกช่องทางและการจองที่ถูกต้อง');
+        if (!['game', 'coaching'].includes(String(v.kind)) || typeof v.id !== 'string' || !validPaymentChannelId(v.channel)) fail(400, 'เลือกช่องทางและการจองที่ถูกต้อง');
         const row = paymentRow(await db.readFinance(), v.kind as 'game' | 'coaching', v.id as string);
         if (row.playerId !== 'line:' + actor.sub) fail(404, 'ไม่พบการจองของคุณ');
         claims = { kind: v.kind as 'game' | 'coaching', id: v.id as string, channel: v.channel as string };
@@ -81,7 +81,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       const row = paymentRow(await db.readFinance(), claims.kind, claims.id);
       if (row.cancelledAt || row.paidAt || row.receipts?.at(-1)?.status === 'pending' || stripeLocksPayment(row.stripe)) fail(409, 'รายการนี้ไม่เปิด QR สำหรับการโอนซ้ำ');
       if (paymentHoldExpired(row)) fail(410, expiredHoldMessage);
-      const account = transferOptions(row.transferAccount).find(c => (c.kind || 'bank') === claims.channel);
+      const account = transferOptions(row.transferAccount).find(c => paymentChannelId(c) === claims.channel);
       if (!account) fail(404, 'ช่องทางนี้ไม่ได้อยู่ในการจอง');
       const amount = claims.kind === 'game' ? row.amount : Math.round(row.amount * 100);
       let payload: string; try { payload = paymentQrPayload(account, amount); } catch { return fail(409, 'ยังไม่ได้เพิ่ม QR รับเงินของธนาคารสำหรับการจองนี้ ใช้เลขบัญชีที่แสดง'); }

@@ -283,13 +283,14 @@ test('owner enables bank PromptPay for new game and coaching bookings; old booki
   assert.equal((await f.request(path, { channels: [{ ...bank, bankPromptPayPhone: '0899999999' }] }, owner)).status, 200);
   const fresh = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('b'))).json()).booking;
   assert.equal(f.data.bookings.find(b => b.id === old.id)!.transferAccount!.bankPromptPayPhone, undefined);
-  assert.equal(f.data.bookings.find(b => b.id === fresh.id)!.transferAccount!.bankPromptPayPhone, '0899999999');
+  assert.equal(f.data.bookings.find(b => b.id === fresh.id)!.transferAccount!.alternatives![0].id, 'bank-promptpay');
+  assert.equal(f.data.bookings.find(b => b.id === fresh.id)!.transferAccount!.alternatives![0].accountNumber, '0899999999');
   const coach = await (await f.request('/api/coaching/coaches', { name: 'Fixture', specialty: 'Test', bio: '', venue: 'Court', hourlyRate: 550, bookingFee: 100, active: true }, owner)).json();
   const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start: new Date(Math.ceil((Date.now() + 86400000) / 1800000) * 1800000).toISOString(), hours: 1, status: 'open' }, owner)).json();
   const lesson = await (await f.request('/api/player/lessons', { slotId: slot.id }, f.player('b'))).json();
   await f.request(path, { channels: [{ ...bank, bankPromptPayPhone: '0888888888' }] }, owner);
   for (const row of [{ kind: 'game', id: fresh.id, amount: 190 }, { kind: 'coaching', id: lesson.id, amount: 550 }]) {
-    const result = await (await f.request('/api/player/payments/qr', { ...row, channel: 'bank', amount: 1 }, f.player('b'))).json();
+    const result = await (await f.request('/api/player/payments/qr', { ...row, channel: 'bank-promptpay', amount: 1 }, f.player('b'))).json();
     assert.ok(result.url);
     const pagePath = new URL(result.url).pathname + new URL(result.url).search;
     const page = await (await f.request(pagePath)).text(); assert.match(page, /QR พร้อมเพย์ระบุยอดจองแล้ว/); assert.doesNotMatch(page, /กรอกยอดจอง/);
@@ -297,6 +298,46 @@ test('owner enables bank PromptPay for new game and coaching bookings; old booki
     const png = PNG.sync.read(Buffer.from(await image.arrayBuffer()));
     assert.equal(jsQR(new Uint8ClampedArray(png.data), png.width, png.height)?.data, generatePayload('0899999999', { amount: row.amount }));
   }
+});
+
+test('three receiver routes keep two PromptPay QR destinations distinct and preserve old snapshots when each route is disabled', async t => {
+  const f = fixture(t), owner = await f.signIn(), route = '/api/marketplace/setup/transfer-channels';
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  const channels = [
+    { id: 'bank', kind: 'bank', enabled: true, bankName: 'BAY', accountName: 'Bank fixture', accountNumber: '1234567890' },
+    { id: 'bank-promptpay', kind: 'promptpay', enabled: true, bankName: 'BAY', accountName: 'Bank fixture', accountNumber: '0899999999', linkedBank: { bankName: 'BAY', accountNumber: '1234567890' } },
+    { id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'Other fixture', accountNumber: '0812345678', linkedBank: { bankName: 'SCB', accountNumber: '9876543210' } },
+  ];
+  assert.equal((await f.request(route, { channels }, owner)).status, 200);
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
+  const stored = JSON.stringify(f.data.bookings.find(b => b.id === id)!.transferAccount);
+  const coach = await (await f.request('/api/coaching/coaches', { name: 'Fixture', specialty: 'Test', bio: '', venue: 'Court', hourlyRate: 550, bookingFee: 100, active: true }, owner)).json();
+  const slot = await (await f.request('/api/coaching/slots', { coachId: coach.id, start: new Date(Math.ceil((Date.now() + 86400000) / 1800000) * 1800000).toISOString(), hours: 1, status: 'open' }, owner)).json();
+  const lesson = await (await f.request('/api/player/lessons', { slotId: slot.id }, f.player('a'))).json();
+  for (const row of [{ kind: 'game', id, amount: 190 }, { kind: 'coaching', id: lesson.id, amount: 550 }]) for (const [channel, mobile] of [['bank-promptpay', '0899999999'], ['promptpay', '0812345678']]) {
+    const ticket = await (await f.request('/api/player/payments/qr', { kind: row.kind, id: row.id, channel }, f.player('a'))).json();
+    assert.ok(ticket.url);
+    const imageUrl = new URL(ticket.url.replace('/view?', '/image?'));
+    const response = await f.request(imageUrl.pathname + imageUrl.search);
+    assert.equal(response.status, 200);
+    const png = PNG.sync.read(Buffer.from(await response.arrayBuffer()));
+    assert.equal(jsQR(new Uint8ClampedArray(png.data), png.width, png.height)?.data, generatePayload(mobile, { amount: row.amount }));
+  }
+  assert.equal((await f.request('/api/player/payments/qr', { kind: 'game', id, channel: 'bank' }, f.player('a'))).status, 409);
+  assert.equal((await f.request('/api/player/payments/qr', { kind: 'game', id, channel: 'bank-promptpay' }, f.player('b'))).status, 404);
+  assert.equal((await f.request('/api/player/payments/qr', { kind: 'game', id, channel: 'unknown' }, f.player('a'))).status, 400);
+  for (const only of channels) {
+    assert.equal((await f.request(route, { channels: channels.map(c => ({ ...c, enabled: c.id === only.id })) }, owner)).status, 200);
+    const newId = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('test-' + only.id))).json()).booking.id;
+    assert.ok(newId);
+    const current = f.data.bookings.find(b => b.id === newId)!.transferAccount!;
+    assert.equal(current.id, only.id); assert.equal(current.alternatives, undefined);
+    assert.equal(JSON.stringify(f.data.bookings.find(b => b.id === id)!.transferAccount), stored);
+  }
+  await f.request(route, { channels: channels.map(c => ({ ...c, enabled: false })) }, owner);
+  assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('blocked'))).status, 503);
+  const result = await (await f.request('/api/player/payments/qr', { kind: 'game', id, channel: 'bank-promptpay' }, f.player('a'))).json();
+  assert.ok(result.url);
 });
 
 test('external QR download only serves an owned unpaid booking snapshot and stops after a pending receipt, cancellation or expiry', async t => {

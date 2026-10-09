@@ -22,16 +22,18 @@ test('bank PromptPay uses its own normalized mobile and preserves booking snapsh
   assert.equal(parsed[0].bankPromptPayPhone, '0899999999');
   const snapshot = activeTransferAccount({ channels: parsed })!;
   parsed[0].bankPromptPayPhone = '0888888888';
-  assert.equal(paymentQrPhone(snapshot), '0899999999');
-  assert.equal(paymentQrPhone(snapshot.alternatives![0]), phone.accountNumber);
+  assert.equal(paymentQrPhone(snapshot), undefined);
+  assert.equal(paymentQrPhone(snapshot.alternatives![0]), '0899999999');
+  assert.equal(paymentQrPhone(snapshot.alternatives![1]), phone.accountNumber);
   assert.equal(paymentStaticQr(snapshot), undefined);
   for (const channels of [[{ ...bank, bankPromptPayPhone: '12345' }], [{ ...phone, bankPromptPayPhone: '0899999999' }], [{ ...bank, bankPromptPayPhone: phone.accountNumber }, phone]]) assert.equal(parsePaymentChannels(channels), null);
   const html = renderToStaticMarkup(createElement(PlayerTransferInstructions, { account: snapshot, amount: 12050, slipok: true, pending: false }));
-  assert.match(html, /QR พร้อมเพย์ที่ผูกกับ BAY/); assert.match(html, /120\.50/); assert.doesNotMatch(html, /กรอกยอดจองด้านบนเอง/);
+  assert.match(html, /พร้อมเพย์ · BAY/); assert.match(html, /120\.50/); assert.doesNotMatch(html, /กรอกยอดจองด้านบนเอง/);
 });
 
 test('bank-linked PromptPay slip stays bank-classified and rejects relinked bank or contradictory account', () => {
-  const account = activeTransferAccount({ channels: [{ ...bank, bankPromptPayPhone: '0899999999' }, phone] })!;
+  // Already-created bookings retain the legacy bank/PromptPay snapshot.
+  const account = { ...bank, bankPromptPayPhone: '0899999999', alternatives: [phone] };
   const slip = payload(); slip.data.receivingBank = '025'; slip.data.receiver.proxy.value = '089xxx9999'; slip.data.receiver.account.value = '';
   assert.equal(slipokResult(slip, true, 19000, account, bookedAt, now).paymentChannel, 'bank');
   slip.data.receivingBank = '004'; assert.equal(slipokResult(slip, true, 19000, account, bookedAt, now).status, 'rejected');

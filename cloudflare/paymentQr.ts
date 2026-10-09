@@ -2,7 +2,7 @@ import core from 'qrcode/lib/core/qrcode.js';
 import type { TransferAccount } from '../src/marketplaceTypes';
 import { promptPayPayload } from '../src/promptPay';
 import { staticBankQr } from '../src/bankQr';
-import { paymentQrPhone } from '../src/paymentChannels';
+import { paymentQrPhone, validPaymentChannelId } from '../src/paymentChannels';
 
 export function paymentQrPayload(account: TransferAccount, amount: number) {
   const phone = paymentQrPhone(account);
@@ -23,7 +23,7 @@ export async function readQrTicket(secret: string, ticket: string, now = Date.no
     if (!/^[A-Za-z0-9_-]{30,1024}$/.test(ticket)) return null;
     const bytes = Uint8Array.from(atob(ticket.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
     const claims = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes.slice(0,12) }, await qrKey(secret), bytes.slice(12))));
-    if (!['game', 'coaching'].includes(claims.kind) || typeof claims.id !== 'string' || claims.id.length > 120 || !['bank', 'promptpay'].includes(claims.channel) || !Number.isSafeInteger(claims.exp) || claims.exp <= now || claims.exp > now + 5 * 60000) return null;
+    if (!['game', 'coaching'].includes(claims.kind) || typeof claims.id !== 'string' || claims.id.length > 120 || !validPaymentChannelId(claims.channel) || !Number.isSafeInteger(claims.exp) || claims.exp <= now || claims.exp > now + 5 * 60000) return null;
     return claims;
   } catch { return null; }
 }
