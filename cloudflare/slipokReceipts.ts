@@ -4,7 +4,7 @@ import type { TidbDocuments, Audit } from './tidbDocuments';
 import type { ReceiptKV } from './pilot';
 import { fail } from './pilotDomain';
 import { verifySlipOk, slipokConfigured, type SlipOkEnv, type SlipVerification } from './slipok';
-import { needsCurrencyRecheck } from '../src/slipokCompatibility';
+import { needsCurrencyRecheck, needsReceiverRecheck } from '../src/slipokCompatibility';
 import { digest } from './pilotAuth';
 
 function pendingReceipt(docs: FinanceDocuments, kind: 'game' | 'coaching', id: string, receiptId: string) {
@@ -23,18 +23,20 @@ export async function checkStoredReceipt(db: TidbDocuments, env: SlipOkEnv & { R
   const input = await db.updateFinance(docs => {
     const p = pendingReceipt(docs, kind, id, receiptId), old = p.receipt.verification;
     const currencyRecovery = audit.actorType === 'admin' && needsCurrencyRecheck(old);
-    if (old?.status === 'verified' || old?.status === 'rejected' && !currencyRecovery) fail(409, 'มีผลตรวจแล้ว ให้แอดมินอนุมัติหรือปฏิเสธสลิป');
-    if (currencyRecovery && !/^[a-f0-9]{64}$/.test(p.receipt.sha256 || '')) fail(409, 'สลิปนี้ไม่มีข้อมูลยืนยันภาพเดิม กรุณาติดต่อเจ้าของก่อนตรวจใหม่');
+    const receiverRecovery = audit.actorType === 'admin' && needsReceiverRecheck(old);
+    const recovery = currencyRecovery || receiverRecovery;
+    if (old?.status === 'verified' || old?.status === 'rejected' && !recovery) fail(409, 'มีผลตรวจแล้ว ให้แอดมินอนุมัติหรือปฏิเสธสลิป');
+    if (recovery && !/^[a-f0-9]{64}$/.test(p.receipt.sha256 || '')) fail(409, 'สลิปนี้ไม่มีข้อมูลยืนยันภาพเดิม กรุณาติดต่อเจ้าของก่อนตรวจใหม่');
     if (old?.retryAt && Date.parse(old.retryAt) > Date.now()) fail(429, 'ยังไม่ถึงเวลาตรวจใหม่ กรุณารอเวลาที่แจ้ง');
-    p.receipt.verification = { provider: 'slipok', status: 'checking', checkedAt: new Date().toISOString(), attemptId, retryAt: new Date(Date.now() + 45000).toISOString(), message: 'กำลังตรวจรายการกับ SlipOK', ...(currencyRecovery ? { currencyRecovery: true as const } : {}) };
-    return { amount: p.amount, account: structuredClone(p.account), bookedAt: p.row.createdAt, mimeType: p.receipt.mimeType, currencyRecovery, sha256: p.receipt.sha256 };
+    p.receipt.verification = { provider: 'slipok', status: 'checking', checkedAt: new Date().toISOString(), attemptId, retryAt: new Date(Date.now() + 45000).toISOString(), message: 'กำลังตรวจรายการกับ SlipOK', ...(currencyRecovery ? { currencyRecovery: true as const } : {}), ...(receiverRecovery ? { receiverRecovery: true as const } : {}) };
+    return { amount: p.amount, account: structuredClone(p.account), bookedAt: p.row.createdAt, mimeType: p.receipt.mimeType, currencyRecovery, receiverRecovery, recovery, sha256: p.receipt.sha256 };
   }, { ...audit, action: 'slipok.check.started' });
   let result: SlipVerification;
   try {
     const image = await env.RECEIPTS!.get('receipt:' + receiptId, 'arrayBuffer');
     if (!image) throw Error('missing image');
-    if (input.currencyRecovery && await digest(new Uint8Array(image)) !== input.sha256) throw Error('image changed');
-    result = await verifySlipOk(env, image, input.mimeType, input.amount, input.account, input.bookedAt, fetch, input.currencyRecovery);
+    if (input.recovery && await digest(new Uint8Array(image)) !== input.sha256) throw Error('image changed');
+    result = await verifySlipOk(env, image, input.mimeType, input.amount, input.account, input.bookedAt, fetch, input.recovery);
   } catch { result = { provider: 'slipok', status: 'retry', checkedAt: new Date().toISOString(), retryAt: new Date(Date.now() + 60000).toISOString(), message: 'ภาพหรือบริการตรวจยังไม่พร้อม กรุณาตรวจใหม่' }; }
   return db.updateFinance(docs => {
     const p = pendingReceipt(docs, kind, id, receiptId);
@@ -45,6 +47,7 @@ export async function checkStoredReceipt(db: TidbDocuments, env: SlipOkEnv & { R
       if (receipts.some(r => r.id !== receiptId && (r.verifiedTransferReference === result.reference || r.verification?.status === 'verified' && r.verification.reference === result.reference))) result = { provider: 'slipok', status: 'rejected', checkedAt: result.checkedAt, code: 1012, message: 'รายการโอนนี้ถูกใช้กับสลิปอื่นในแอปแล้ว' };
     }
     if (input.currencyRecovery && ['retry', 'unavailable'].includes(result.status)) result.currencyRecovery = true;
+    if (input.receiverRecovery && ['retry', 'unavailable'].includes(result.status)) result.receiverRecovery = true;
     p.receipt.verification = result; return result;
   }, { ...audit, action: 'slipok.check.completed' });
 }

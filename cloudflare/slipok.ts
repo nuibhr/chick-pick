@@ -7,6 +7,7 @@ export type SlipVerification = {
   checkedAt: string; message: string; code?: number; reference?: string; amountSatang?: number;
   transferredAt?: string; receiver?: string; attemptId?: string; retryAt?: string; paymentChannel?: 'bank' | 'promptpay'; paymentChannelLabel?: string;
   currencyRecovery?: true;
+  receiverRecovery?: true;
 };
 export const slipokConfigured = (env: SlipOkEnv) => Boolean(env.SLIPOK_API_KEY && !/[\s\x00-\x1f]/.test(env.SLIPOK_API_KEY) && /^\d{1,10}$/.test(env.SLIPOK_BRANCH_ID || ''));
 export type SlipOkConnection = { configured: boolean; connected: boolean; quota: number | null; overQuota?: number | null; message: string; checkedAt: string; diagnostic?: string; upstreamStatus?: number | null };
@@ -77,6 +78,12 @@ function receiverChannel(receiver: Record<string, unknown>, receivingBank: strin
       return proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, channel.accountNumber)
         || Boolean(channel.linkedBank && bankAccount.type === 'BANKAC' && matchesSlipAccount(bankAccount.value, channel.linkedBank.accountNumber));
     }
+    // The bank's PromptPay QR identifies the same registered mobile as a
+    // PromptPay channel. SCB can omit receiving bank/account for that transfer.
+    // Only absent account evidence may use this fallback; never override a
+    // conflicting bank or account reported by the issuer.
+    if (!receivingBank) return Boolean(banks[sendingBank] && channel.bankPromptPayPhone && !short(bankAccount.value)
+      && proxy.type === 'MSISDN' && matchesSlipMobile(proxy.value, channel.bankPromptPayPhone));
     if (!bankMatches(channel.bankName)) return false;
     if (matchesSlipAccount(bankAccount.value, channel.accountNumber)) return true;
     // A mobile may have been relinked: a contradictory receiving account must not pass.
@@ -119,7 +126,7 @@ export function slipokResult(payload: unknown, httpOk: boolean, expectedSatang: 
   return { provider: 'slipok', status: 'verified', checkedAt, message: 'SlipOK ยืนยันรายการ ยอด และบัญชีผู้รับตรงแล้ว รอแอดมินอนุมัติ', reference, amountSatang: expectedSatang, transferredAt: new Date(timestamp).toISOString(), receiver: short(receiver.displayName) || short(receiver.name), paymentChannel: matched.kind || 'bank', paymentChannelLabel: channelLabel(matched) };
 }
 
-export async function verifySlipOk(env: SlipOkEnv, image: ArrayBuffer, mimeType: ReceiptSubmission['mimeType'], amount: number, account: TransferAccount, bookedAt: string, transport: typeof fetch = fetch, currencyRecovery = false): Promise<SlipVerification> {
+export async function verifySlipOk(env: SlipOkEnv, image: ArrayBuffer, mimeType: ReceiptSubmission['mimeType'], amount: number, account: TransferAccount, bookedAt: string, transport: typeof fetch = fetch, parserRecovery = false): Promise<SlipVerification> {
   const checkedAt = new Date().toISOString();
   if (!slipokConfigured(env)) return { provider: 'slipok', status: 'unavailable', checkedAt, message: 'ยังไม่ตั้งคีย์ SlipOK ฝั่งเซิร์ฟเวอร์' };
   try {
@@ -127,7 +134,7 @@ export async function verifySlipOk(env: SlipOkEnv, image: ArrayBuffer, mimeType:
     form.append('files', new Blob([image], { type: mimeType }), 'slip.' + (mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg'));
     // A narrowly scoped admin repair re-verifies the same hashed image without
     // logging it twice. The receipt transaction still reserves references locally.
-    if (!currencyRecovery) form.append('log', 'true');
+    if (!parserRecovery) form.append('log', 'true');
     form.append('amount', (amount / 100).toFixed(2));
     const r = await slipokRequest(env, '', { method: 'POST', body: form }, 18000, transport);
     return slipokResult(await slipokJson(r), r.ok, amount, account, bookedAt);

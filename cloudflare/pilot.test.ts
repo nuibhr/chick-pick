@@ -16,7 +16,43 @@ import jsQR from 'jsqr';
 import generatePayload from 'promptpay-qr';
 import { activeBooking } from '../src/marketplaceTypes';
 import { publicSession } from './tidbPreview';
+import { legacyReceiverFailure } from '../src/slipokCompatibility';
 const stripeAudit = { actorId: 'test', actorType: 'admin' as const, action: 'test.stripe', entityId: 'fixture' };
+
+test('admin rechecks local recipient parser failures against the original hashed image without bypassing duplicate or upstream rejection', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  Object.assign(f.env, { SLIPOK_API_KEY: 'fixture-private-secret', SLIPOK_BRANCH_ID: '77946' });
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  await f.request('/api/marketplace/setup/transfer-channels', { channels: [{ id: 'bank', kind: 'bank', enabled: true, bankName: 'BAY', accountName: 'Fixture', accountNumber: '1234567890', bankPromptPayPhone: '0812345678' }] }, owner);
+  const rows = [];
+  for (const who of ['a', 'b', 'c', 'd']) {
+    const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who))).json()).booking.id;
+    const bytes = new Uint8Array([137,80,78,71,13,10,26,10,rows.length]);
+    const receipt = { id: crypto.randomUUID(), fileName: 'fixture.png', mimeType: 'image/png' as const, size: bytes.length, sha256: await digest(bytes), status: 'pending' as const, submittedAt: new Date().toISOString(), ocr: { status: 'unavailable' as const, amount: null, transferredAt: null, reference: null, sender: null, receiver: null, rawText: null, confidence: null }, verification: { provider: 'slipok' as const, status: 'rejected' as const, checkedAt: new Date().toISOString(), message: legacyReceiverFailure, code: 1014 } };
+    f.data.bookings.find(b => b.id === id)!.receipts = [receipt];
+    f.images.set('receipt:' + receipt.id, bytes.buffer); rows.push({ id, receiptId: receipt.id });
+  }
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (_url: any, init: any) => {
+    calls++; assert.equal(init.body.has('log'), false); assert.equal(init.body.get('amount'), '190.00');
+    return Response.json({ success: true, data: { ...slipOKPayload().data, sendingBank: '014', receivingBank: '', paidLocalCurrency: null, receiver: { proxy: { type: 'MSISDN', value: '081xxx5678' }, account: { type: '', value: '' } } } });
+  });
+  const path = (r: typeof rows[number]) => `/api/marketplace/bookings/${r.id}/receipts/${r.receiptId}/verify`;
+  assert.equal((await f.request(path(rows[0]), {}, f.player('a'))).status, 401);
+  assert.equal((await f.request(path(rows[0]), {}, owner)).status, 200);
+  assert.equal(f.data.bookings[0].receipts![0].verification!.status, 'verified');
+  assert.equal(f.data.bookings[0].paidAt, undefined);
+  assert.equal((await f.request(path(rows[1]), {}, owner)).status, 200);
+  assert.equal(f.data.bookings[1].receipts![0].verification!.code, 1012);
+  f.images.set('receipt:' + rows[2].receiptId, new Uint8Array([1,2,3]).buffer);
+  assert.equal((await f.request(path(rows[2]), {}, owner)).status, 200);
+  assert.equal(f.data.bookings[2].receipts![0].verification!.status, 'retry');
+  assert.equal(f.data.bookings[2].receipts![0].verification!.receiverRecovery, true);
+  f.data.bookings[3].receipts![0].verification!.message = 'บัญชีผู้รับไม่ตรงกับบัญชีที่ผูกใน SlipOK';
+  assert.equal((await f.request(path(rows[3]), { receiverRecovery: true }, owner)).status, 409);
+  assert.equal(calls, 2);
+  assert.equal((await (await f.request('/api/finance/report', undefined, owner)).json()).summary.income, 0);
+});
 
 test('catalog mutations require operations, reject forged/cross-site requests and never mutate on GET', async t => {
   const f = fixture(t), owner = await f.signIn();

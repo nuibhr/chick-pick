@@ -16,6 +16,15 @@ test('legacy currency failure offers a same-image repair, while other rejected c
   assert.doesNotMatch(duplicate, /ตรวจสลิปเดิมใหม่หลังแก้ระบบ/);
 });
 
+test('only local recipient parser failures offer a recheck and never immediate payment approval', () => {
+  const local = view({ ...receipt, verification: { provider: 'slipok', status: 'rejected', checkedAt: receipt.submittedAt, code: 1014, message: 'ข้อมูลผู้รับบนสลิปไม่ตรงกับช่องทางรับเงินของการจองนี้ หรือข้อมูลที่ธนาคารเปิดเผยยังยืนยันไม่ได้' } });
+  assert.match(local, /ตรวจสลิปเดิมใหม่หลังแก้ระบบ/);
+  assert.match(local, /ธนาคารส่งเฉพาะเบอร์พร้อมเพย์/);
+  assert.doesNotMatch(local, /ยืนยันเงินเข้าและอนุมัติ/);
+  const upstream = view({ ...receipt, verification: { provider: 'slipok', status: 'rejected', checkedAt: receipt.submittedAt, code: 1014, message: 'บัญชีผู้รับไม่ตรงกับบัญชีที่ผูกใน SlipOK' } });
+  assert.doesNotMatch(upstream, /ตรวจสลิปเดิมใหม่หลังแก้ระบบ/);
+});
+
 test('new and failed SlipOK reviews do not ask staff to type reference or amount', () => {
   const fresh = view(receipt);
   assert.match(fresh, /ตรวจสลิปด้วย SlipOK/);
