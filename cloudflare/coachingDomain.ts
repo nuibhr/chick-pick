@@ -7,6 +7,8 @@ import { recordVerifiedTransfer } from './receiptVerification';
 import { stripeLocksPayment, stripePublicView } from '../src/paymentTypes';
 import { publicTransferAccount } from '../src/paymentChannels';
 import { catalogManagement, venueOpen } from './catalogManagement';
+import { assertRefundReferenceAvailable } from './refunds';
+import { publicRefund } from '../src/refundTypes';
 
 const active = (e: Enrollment) => !e.cancelledAt && !lessonHoldExpired(e) && e.lessons.some(l => l.status !== 'cancelled');
 const reserved = (docs: FinanceDocuments, slot: CoachSlot) => docs.coaching.some(e => e.coachId === slot.coachId && active(e) && e.lessons.some(l => l.status !== 'cancelled' && Date.parse(l.start) < Date.parse(slot.start) + slot.hours * 3600000 && Date.parse(l.start) + l.hours * 3600000 > Date.parse(slot.start)));
@@ -102,6 +104,7 @@ export function reviewLessonReceipt(docs: FinanceDocuments, id: string, receiptI
   if (v.action === 'approve') {
     if (v.fundsChecked !== true) fail(400, 'ต้องตรวจยอดเงินเข้าบัญชีจริงก่อนอนุมัติ');
     recordVerifiedTransfer(r, Math.round(e.amount * 100), v, [...docs.marketplace.bookings, ...docs.coaching].flatMap(item => item.receipts || []));
+    assertRefundReferenceAvailable(docs, r.verifiedTransferReference);
     r.status = 'approved'; e.paidAt = new Date().toISOString(); e.payment = 'paid'; e.paymentMethod = 'transfer';
   } else if (v.action === 'reject') { r.rejectReason = text(v.reason, 200); if (r.rejectReason.length < 3) fail(400, 'ระบุเหตุผลอย่างน้อย 3 ตัวอักษร'); r.status = 'rejected'; e.holdExpiresAt = new Date(Date.now() + 1800000).toISOString(); }
   else fail(400, 'เลือกอนุมัติหรือปฏิเสธ');
@@ -125,5 +128,5 @@ export function completeLesson(docs: FinanceDocuments, id: string) {
 
 export function lessonView(e: Enrollment) {
   const receipt = e.receipts?.at(-1);
-  return { kind: 'coaching' as const, id: e.id, sessionId: e.lessons[0]?.slotId || '', title: e.title, startsAt: e.lessons[0]?.start, venue: e.venue || '', hours: e.totalHours, amount: Math.round(e.amount * 100), createdAt: e.createdAt, holdExpiresAt: e.holdExpiresAt || null, paidAt: e.paidAt || null, admissionStatus: e.payment === 'paid' ? 'approved' : 'pending', cancelledAt: e.cancelledAt || (lessonHoldExpired(e) ? e.holdExpiresAt : null), transferAccount: publicTransferAccount(e.transferAccount), completed: e.lessons.every(l => l.status === 'completed'), stripe: stripePublicView(e.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null };
+  return { kind: 'coaching' as const, id: e.id, sessionId: e.lessons[0]?.slotId || '', title: e.title, startsAt: e.lessons[0]?.start, venue: e.venue || '', hours: e.totalHours, amount: Math.round(e.amount * 100), createdAt: e.createdAt, holdExpiresAt: e.holdExpiresAt || null, paidAt: e.paidAt || null, admissionStatus: e.payment === 'paid' ? 'approved' : 'pending', cancelledAt: e.cancelledAt || (lessonHoldExpired(e) ? e.holdExpiresAt : null), refund: publicRefund(e.refund), transferAccount: publicTransferAccount(e.transferAccount), completed: e.lessons.every(l => l.status === 'completed'), stripe: stripePublicView(e.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null };
 }

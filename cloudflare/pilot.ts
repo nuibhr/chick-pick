@@ -19,6 +19,7 @@ import { paymentQrPhone } from '../src/paymentChannels';
 import { stripeLocksPayment } from '../src/paymentTypes';
 import { expiredHoldMessage, paymentHoldExpired } from '../src/bookingHold';
 import { catalogManagement, deleteCatalogEntry, pauseSession, saveSession, type CatalogKind } from './catalogManagement';
+import { manageRefund, assertRefundReferenceAvailable } from './refunds';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
 export type PilotEnv = StripeEnv & SlipOkEnv & { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
@@ -203,6 +204,11 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     }
     const owner = await authenticateAdmin(request, env.ADMIN_SESSION_SECRET, db);
     authorize(owner.roles, path, request.method);
+    const refundRoute = path.match(/^\/api\/(marketplace\/bookings|coaching\/enrollments)\/([^/]+)\/refund$/);
+    if (refundRoute && request.method === 'POST') {
+      const v = await body(request), kind = refundRoute[1] === 'marketplace/bookings' ? 'game' : 'coaching';
+      return json(await db.updateFinance(d => manageRefund(d, kind, refundRoute[2], v, owner), { ...audit(owner, `refund.${String(v.action)}`, refundRoute[2], true), entityType: kind === 'game' ? 'booking' : 'enrollment' }));
+    }
     const verifyReceipt = path.match(/^\/api\/(marketplace\/bookings|coaching\/enrollments)\/([^/]+)\/receipts\/([^/]+)\/verify$/);
     if (verifyReceipt) {
       if (request.method !== 'POST') fail(405, 'ใช้ POST');
@@ -331,6 +337,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
             const booking = docs.marketplace.bookings.find(b => b.id === bookingId)!;
             const receipt = booking.receipts!.find(r => r.id === receiptId)!;
             recordVerifiedTransfer(receipt, booking.amount, v, [...docs.marketplace.bookings, ...docs.coaching].flatMap(item => item.receipts || []));
+            assertRefundReferenceAvailable(docs, receipt.verifiedTransferReference);
           }
           return result;
         }, audit(owner, `receipt.${v.action}`, receiptId, true)));

@@ -629,6 +629,35 @@ test('organizer releases unpaid game reservations, but cannot cancel payments or
   assert.equal((await f.request('/api/marketplace/bookings/'+next+'/cancel',{},owner)).status,409);
 });
 
+test('refund API cancels pending slips atomically, keeps private evidence, and cannot approve cancelled money', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  const player = f.player('refund');
+  const booking = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, player)).json()).booking.id;
+  const upload = await pilotRequest(new Request(`https://example.com/api/player/bookings/${booking}/receipt`, { method: 'POST', headers: { ...player, 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10]) }), f.env, f.verify);
+  const receipt = (await upload.json()).receipt.id, url = `/api/marketplace/bookings/${booking}/refund`;
+  const command = { action: 'cancel', reason: 'ยกเลิกสลิปเดิมและติดตามการคืนเงิน', confirmCancellation: true };
+  assert.equal((await f.request(url, command, player)).status, 401);
+  assert.equal((await f.request(url, command, { ...owner, Origin: 'https://evil.example' })).status, 403);
+  const responses = await Promise.all([f.request(url, command, owner), f.request(url, command, owner)]);
+  assert.deepEqual(responses.map(r => r.status), [200, 200]);
+  assert.equal(f.data.bookings[0].refund?.status, 'review_required'); assert.equal(f.images.size, 1);
+  assert.equal((await f.request(`/api/marketplace/bookings/${booking}/receipts/${receipt}`, undefined, owner)).status, 200);
+  assert.equal((await f.request(`/api/marketplace/bookings/${booking}/receipts/${receipt}/review`, { action: 'approve', fundsChecked: true, receivedAmount: 190, transferReference: 'SOURCE123456' }, owner)).status, 409);
+  const incoming = { action: 'confirm_received', fundsChecked: true, receiptId: receipt, receivedAmount: 19000, transferReference: 'SOURCE123456' };
+  const confirmation = await Promise.all([f.request(url, incoming, owner), f.request(url, incoming, owner)]);
+  assert.deepEqual(confirmation.map(r => r.status).sort(), [200, 409]);
+  let report = await (await f.request('/api/finance/report', undefined, owner)).json();
+  assert.equal(report.summary.income, 19000); assert.equal(report.summary.pendingExpense, 19000);
+  assert.equal((await f.request(url, { action: 'complete', refundReference: 'OUT123456' }, owner)).status, 409);
+  const complete = { action: 'complete', refundTransferred: true, refundReference: 'OUT123456' };
+  await Promise.all([f.request(url, complete, owner), f.request(url, complete, owner)]);
+  report = await (await f.request('/api/finance/report', undefined, owner)).json();
+  assert.equal(report.rows.filter((r: any) => r.category === 'refund').length, 1);
+  assert.equal(report.summary.income, 19000); assert.equal(report.summary.expense, 19000); assert.equal(report.summary.net, 0);
+  assert.equal(f.data.bookings[0].paidAt, undefined); assert.equal(f.images.size, 1);
+});
+
 function fixture(t: TestContext) {
   const data: MarketplaceData = { sessions: [{ id:'game',title:'ก๊วนทดสอบ',venue:'สนาม',area:'ขอนแก่น',date:'',time:'18–20',price:190,joined:0,capacity:4,dupr:'<3.5',vibe:'เบา–กลาง',host:'ผู้จัด',hostRating:0,courtCount:1,venueCost:0,tags:[],startsAt:new Date(Date.now()+86400000).toISOString(),status:'open' }], bookings:[] };
   const docs = new Map<string,unknown>(), images = new Map<string,ArrayBuffer>(); let tail = Promise.resolve();

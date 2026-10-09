@@ -22,7 +22,7 @@ export default function ReceiptReview({ booking, receipt, busy, mutate, routeBas
     <img src={path + '?retry=' + retry} alt={'สลิปของ ' + booking.playerName} onLoad={() => { setImageError(false); setImageReady(true); }} onError={() => { setImageReady(false); setImageError(true); }} />
     {imageError && <p role="alert">ภาพยังไม่พร้อมหรือสิทธิ์หมดอายุ <button type="button" onClick={() => { setImageError(false); setImageReady(false); setRetry(n => n + 1); }}>ลองโหลดภาพใหม่</button></p>}
   </div><div>
-    <small>รอตรวจ · {new Date(receipt.submittedAt).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' })}</small><h3>{booking.playerName}</h3><p>{booking.title}</p>
+    <a className="wp-switch" href="/miniapp?organizer=1&workspace=operations&section=refunds">ยกเลิกการจอง / ติดตามคืนเงิน →</a><small>รอตรวจ · {new Date(receipt.submittedAt).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' })}</small><h3>{booking.playerName}</h3><p>{booking.title}</p>
     <strong className="wp-amount">ยอดจอง ฿{(booking.amount / 100).toFixed(2)}</strong>
     <details><summary>ช่องทางรับเงินของการจองนี้</summary>{transferOptions(booking.transferAccount).map((account, i) => <p key={account.id || i}>{channelLabel(account)} · {account.accountName}<br />{account.accountNumber}</p>)}</details>
     <SlipVerificationStatus verification={check} details={false} />

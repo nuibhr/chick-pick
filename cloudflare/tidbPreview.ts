@@ -10,6 +10,7 @@ import { ownProfile, profileSettings, updateProfile } from '../server/playerProf
 import { pilotRequest, type ReceiptKV } from './pilot';
 import { publicTransferAccount } from '../src/paymentChannels';
 import { privateAssetPath, secureResponse } from './securityHeaders';
+import { publicRefund } from '../src/refundTypes';
 
 type Env = StripeEnv & SlipOkEnv & {
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -167,7 +168,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
               id: booking.id, sessionId: booking.sessionId, amount: booking.amount, title: booking.title,
               transferAccount: publicTransferAccount(booking.transferAccount), createdAt: booking.createdAt,
               paidAt: booking.paidAt || null, admissionStatus: booking.admissionStatus || 'pending',
-              cancelledAt: booking.cancelledAt || null,
+              cancelledAt: booking.cancelledAt || null, refund: publicRefund(booking.refund),
               holdExpiresAt: booking.holdExpiresAt || null, holdExpired: bookingHoldExpired(booking),
               stripe: stripePublicView(booking.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null,
             };

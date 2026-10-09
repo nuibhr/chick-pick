@@ -44,7 +44,7 @@ export async function checkStoredReceipt(db: TidbDocuments, env: SlipOkEnv & { R
     if (result.status === 'verified') {
       if (p.amount !== input.amount || JSON.stringify(p.account) !== JSON.stringify(input.account)) fail(409, 'ยอดหรือบัญชีเปลี่ยนระหว่างตรวจ');
       const receipts: ReceiptSubmission[] = [...docs.marketplace.bookings, ...docs.coaching].flatMap(row => row.receipts || []);
-      if (receipts.some(r => r.id !== receiptId && (r.verifiedTransferReference === result.reference || r.verification?.status === 'verified' && r.verification.reference === result.reference))) result = { provider: 'slipok', status: 'rejected', checkedAt: result.checkedAt, code: 1012, message: 'รายการโอนนี้ถูกใช้กับสลิปอื่นในแอปแล้ว' };
+      if ([...docs.marketplace.bookings, ...docs.coaching].some(row => row.refund?.transferReference === result.reference) || receipts.some(r => r.id !== receiptId && (r.verifiedTransferReference === result.reference || r.verification?.status === 'verified' && r.verification.reference === result.reference))) result = { provider: 'slipok', status: 'rejected', checkedAt: result.checkedAt, code: 1012, message: 'รายการโอนนี้ถูกใช้กับสลิปอื่นหรือกันไว้คืนเงินในแอปแล้ว' };
     }
     if (input.currencyRecovery && ['retry', 'unavailable'].includes(result.status)) result.currencyRecovery = true;
     if (input.receiverRecovery && ['retry', 'unavailable'].includes(result.status)) result.receiverRecovery = true;
