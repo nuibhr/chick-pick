@@ -192,7 +192,8 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       const receiptId = crypto.randomUUID(), hash = await digest(image);
       const receipt: ReceiptSubmission = { id: receiptId, fileName: `${receiptId}.${type === 'image/jpeg' ? 'jpg' : type === 'image/png' ? 'png' : 'webp'}`, mimeType: type as ReceiptSubmission['mimeType'], size: image.length, sha256: hash, submittedAt: new Date().toISOString(), status: 'pending', ocr: unavailableOcr(), ...(slipokConfigured(env) ? { verification: { provider: 'slipok' as const, status: 'unavailable' as const, checkedAt: new Date().toISOString(), message: 'รอเริ่มตรวจ SlipOK' } } : {}) };
       await env.RECEIPTS.put(`receipt:${receiptId}`, new Uint8Array(image).buffer);
-      try { await db.updateFinance(docs => { const b = receiptEligibility(docs.marketplace, actor, id); if (docs['revenue-settlements'].some(s => s.key === `game:${b.sessionId}`)) fail(409, 'ก๊วนปิดยอดแล้ว'); if (docs.coaching.some(e => e.receipts?.some(r => r.sha256 === receipt.sha256 && r.status !== 'rejected'))) fail(409, 'ภาพสลิปนี้ใช้กับการเรียนแล้ว'); submitReceipt(docs.marketplace, actor, id, receipt); }, audit(actor, 'receipt.submitted', receiptId)); }
+      let lateEvidence = false;
+      try { lateEvidence = await db.updateFinance(docs => { const b = receiptEligibility(docs.marketplace, actor, id); if (docs['revenue-settlements'].some(s => s.key === `game:${b.sessionId}`)) fail(409, 'ก๊วนปิดยอดแล้ว'); if (docs.coaching.some(e => e.receipts?.some(r => r.sha256 === receipt.sha256 && r.status !== 'rejected'))) fail(409, 'ภาพสลิปนี้ใช้กับการเรียนแล้ว'); submitReceipt(docs.marketplace, actor, id, receipt); return receipt.submittedAfterHold === true; }, audit(actor, 'receipt.submitted', receiptId)); }
       catch (e) {
         // Business rejection happened before commit. A network error may have happened after commit;
         // retain the image in that case so a paid booking never loses its evidence.
@@ -200,7 +201,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
         throw e;
       }
       const verification = slipokConfigured(env) ? await checkStoredReceipt(db, env, 'game', id, receiptId, audit(actor, 'slipok.checked', receiptId)) : undefined;
-      return json({ receipt: { id: receiptId, status: 'pending', ocr: receipt.ocr, verification }, message: 'ส่งสลิปแล้ว รอแอดมินอนุมัติเงินและเลือกเข้าสนาม' }, 201);
+      return json({ receipt: { id: receiptId, status: 'pending', submittedAfterHold: lateEvidence, ocr: receipt.ocr, verification }, message: lateEvidence ? 'รับสลิปย้อนหลังเพื่อกระทบยอดแล้ว ไม่มีการถือที่นั่งใหม่ ผู้จัดจะตรวจเวลาโอนและความพร้อมก่อนอนุมัติหรือคืนเงิน' : 'ส่งสลิปแล้ว รอแอดมินอนุมัติเงินและเลือกเข้าสนาม' }, 201);
     }
     const owner = await authenticateAdmin(request, env.ADMIN_SESSION_SECRET, db);
     authorize(owner.roles, path, request.method);
