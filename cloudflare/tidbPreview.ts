@@ -170,7 +170,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
               paidAt: booking.paidAt || null, admissionStatus: booking.admissionStatus || 'pending',
               cancelledAt: booking.cancelledAt || null, refund: publicRefund(booking.refund),
               holdExpiresAt: booking.holdExpiresAt || null, holdExpired: bookingHoldExpired(booking),
-              stripe: stripePublicView(booking.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null,
+              stripe: stripePublicView(booking.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, submittedAfterHold: receipt.submittedAfterHold === true, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null,
             };
           });
           const coaching = (await new TidbDocuments(env.TIDB_DATABASE_URL).readDocument<import('../src/coachingTypes').Enrollment[]>('coaching', [])).filter(e => e.playerId === `line:${identity.sub}`).map(lessonView);
