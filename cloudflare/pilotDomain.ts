@@ -1,7 +1,7 @@
 import type { Booking, MarketplaceData, ReceiptSubmission, Session, TransferAccount } from '../src/marketplaceTypes';
 import { activeBooking } from '../src/marketplaceTypes';
 import { stripeLocksPayment } from '../src/paymentTypes';
-import { OPEN_PLAY_HOLD_MS, expiredHoldMessage, paymentHoldExpired } from '../src/bookingHold';
+import { OPEN_PLAY_HOLD_MS, LATE_RECEIPT_EVIDENCE_MS, expiredHoldMessage, paymentHoldExpired } from '../src/bookingHold';
 
 export class PilotError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -46,7 +46,7 @@ export function cancel(data: MarketplaceData, actor: Actor, id: string, organize
 }
 export function receiptEligibility(data: MarketplaceData, actor: Actor, id: string) {
   const booking = ownBooking(data, actor, id);
-  if (paymentHoldExpired(booking)) fail(410, expiredHoldMessage);
+  if (paymentHoldExpired(booking) && (!booking.holdExpiresAt || Date.now() - Date.parse(booking.holdExpiresAt) > LATE_RECEIPT_EVIDENCE_MS)) fail(410, expiredHoldMessage);
   if (booking.cancelledAt || booking.paidAt || stripeLocksPayment(booking.stripe) || booking.receipts?.at(-1)?.status === 'pending') fail(409, 'รายการนี้ปิดรับสลิป มี QR Stripe หรือมีสลิปรอตรวจแล้ว');
   if (!booking.transferAccount) fail(409, 'รายการนี้ไม่มีบัญชีรับโอน ติดต่อผู้จัด');
   if ((booking.receipts || []).filter(r => Date.parse(r.submittedAt) > Date.now() - 86400000).length >= 10) fail(429, 'ส่งสลิปหลายครั้งเกินไปในวันนี้ กรุณาติดต่อผู้จัด');
@@ -54,6 +54,8 @@ export function receiptEligibility(data: MarketplaceData, actor: Actor, id: stri
 }
 export function submitReceipt(data: MarketplaceData, actor: Actor, id: string, receipt: ReceiptSubmission) {
   const booking = receiptEligibility(data, actor, id);
+  // Evaluated inside the TiDB write transaction, after concurrent capacity changes.
+  receipt.submittedAfterHold = paymentHoldExpired(booking);
   if (data.bookings.some(b => b.id !== id && b.receipts?.some(r => r.sha256 === receipt.sha256 && r.status !== 'rejected'))) fail(409, 'ภาพสลิปนี้ถูกใช้กับการจองอื่นแล้ว');
   booking.receipts = [...(booking.receipts || []), receipt];
 }
@@ -64,6 +66,18 @@ export function review(data: MarketplaceData, context: PilotContext, bookingId: 
   const booking = data.bookings.find(b => b.id === bookingId), receipt = booking?.receipts?.find(r => r.id === receiptId);
   if (!booking || !receipt) fail(404, 'ไม่พบสลิป');
   if (context.closed.includes(`game:${booking.sessionId}`) || booking.cancelledAt || booking.paidAt || receipt.status !== 'pending' || booking.receipts?.at(-1)?.id !== receiptId) fail(409, 'สลิปนี้ไม่อยู่ระหว่างรอตรวจ');
+  if (action === 'approve' && receipt.submittedAfterHold) {
+    const transferredAt = Date.parse(receipt.verification?.transferredAt || '');
+    const createdAt = Date.parse(booking.createdAt), expiresAt = Date.parse(booking.holdExpiresAt || '');
+    if (receipt.verification?.status !== 'verified' || !Number.isFinite(transferredAt) || !Number.isFinite(expiresAt)
+      || transferredAt < Math.floor(createdAt / 1000) * 1000 || transferredAt > expiresAt)
+      fail(409, 'สลิปส่งหลังหมดเวลาและเวลาโอนไม่อยู่ใน 5 นาทีแรก ต้องให้ผู้จัดตรวจเงินและดำเนินการคืนเงิน');
+    const session = data.sessions.find(s => s.id === booking.sessionId);
+    if (!future(session) || session?.bookingPaused
+      || data.bookings.some(b => b.id !== booking.id && b.sessionId === booking.sessionId && b.playerId === booking.playerId && activeBooking(b))
+      || data.bookings.filter(b => b.id !== booking.id && b.sessionId === booking.sessionId && activeBooking(b)).length >= (session?.capacity || 0))
+      fail(409, 'ที่นั่งหมดเวลาหรือไม่ว่างแล้ว ห้ามยืนยันซ้ำ ให้ผู้จัดดำเนินการคืนเงินหรือเปลี่ยนรอบ');
+  }
   receipt.status = action === 'approve' ? 'approved' : 'rejected'; receipt.reviewedAt = new Date().toISOString();
   if (action === 'approve') { booking.paidAt = receipt.reviewedAt; booking.paymentMethod = 'transfer'; }
   else receipt.rejectReason = (reason as string).trim();
