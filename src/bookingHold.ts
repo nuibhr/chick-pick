@@ -21,6 +21,14 @@ export function paymentHoldExpired(row: Hold, now = Date.now()): boolean {
   return row.holdExpired === true || Boolean(row.holdExpiresAt && Date.parse(row.holdExpiresAt) <= now);
 }
 
+// Payment evidence can arrive after the seat was released. This never grants a hold.
+export function canSubmitLateReceipt(row: Hold, now = Date.now()): boolean {
+  const expiresAt = Date.parse(row.holdExpiresAt || '');
+  return Number.isFinite(expiresAt) && now >= expiresAt && now <= expiresAt + LATE_RECEIPT_EVIDENCE_MS
+    && paymentHoldExpired(row, now) && !row.cancelledAt && !row.paidAt
+    && (row.receipts?.at(-1) || row.receipt)?.status !== 'pending';
+}
+
 export function holdTimeLeft(deadline: string, now: number): string {
   const seconds = Math.max(0, Math.ceil((Date.parse(deadline) - now) / 1000));
   return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
