@@ -195,7 +195,7 @@ test('five-minute holds do not extend on retry; expired last seat reopens for ex
   assert.equal(finance.rows.find((r: any) => r.id === 'booking_' + row.id).status, 'void'); assert.equal(finance.summary.income, 0);
 });
 
-test('expired booking cannot upload or mint/reuse QR, while the same player can reserve a new seat', async t => {
+test('expired booking accepts late evidence without renewing its QR or taking back a released seat', async t => {
   const f = fixture(t), owner = await f.signIn(); f.docs.set('worker-pilot', { bookingEnabled: true });
   await f.request('/api/marketplace/setup/transfer-channels', { channels: [{ id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'Fixture', accountNumber: '0812345678' }] }, owner);
   const old = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
@@ -206,7 +206,10 @@ test('expired booking cannot upload or mint/reuse QR, while the same player can 
   const url = new URL(qr.url); assert.equal((await f.request(url.pathname + url.search)).status, 410);
   assert.equal((await f.request(url.pathname.replace('/view', '/image') + url.search)).status, 410);
   const upload = await pilotRequest(new Request(`https://example.com/api/player/bookings/${old}/receipt`, { method: 'POST', headers: { ...f.player('a'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,1]) }), f.env, f.verify);
-  assert.equal(upload!.status, 410); assert.equal(f.images.size, 0); assert.match((await upload!.json()).message, /อย่าโอนซ้ำ/);
+  assert.equal(upload!.status, 201); assert.equal(f.images.size, 1);
+  const evidence = await upload!.json(); assert.equal(evidence.receipt.submittedAfterHold, true); assert.match(evidence.message, /ไม่มีการถือที่นั่งใหม่/);
+  assert.equal(f.data.bookings[0].receipts![0].submittedAfterHold, true);
+  assert.equal(activeBooking(f.data.bookings[0]), false);
   const fresh = await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'));
   assert.equal(fresh.status, 201); assert.notEqual((await fresh.json()).booking.id, old); assert.equal(f.data.bookings.filter(activeBooking).length, 1);
 });
@@ -223,7 +226,7 @@ test('receipt committed before deadline retains the last seat throughout delayed
   assert.equal(f.data.bookings.at(-1)!.receipts![0].status, 'pending'); assert.equal(f.data.bookings.at(-1)!.paidAt, undefined);
 });
 
-test('expiry during image storage is rechecked under the same booking lock; late upload cannot reclaim sold seat', async t => {
+test('expiry during image storage preserves late evidence under the booking lock but cannot reclaim sold seat', async t => {
   const f = fixture(t); await f.signIn(); f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
   for (const who of ['a', 'b', 'c', 'd']) await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who));
   const row = f.data.bookings.at(-1)!;
@@ -234,8 +237,87 @@ test('expiry during image storage is rechecked under the same booking lock; late
   await storageEntered;
   f.data.bookings.at(-1)!.holdExpiresAt = new Date(Date.now() - 1).toISOString();
   assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('e'))).status, 201);
-  release(); assert.equal((await uploading)!.status, 410);
-  assert.equal(f.images.size, 0); assert.equal(f.data.bookings.find(b => b.id === row.id)!.receipts, undefined); assert.equal(f.data.bookings.filter(activeBooking).length, 4);
+  release(); assert.equal((await uploading)!.status, 201);
+  assert.equal(f.images.size, 1); assert.equal(f.data.bookings.find(b => b.id === row.id)!.receipts![0].submittedAfterHold, true);
+  assert.equal(f.data.bookings.filter(activeBooking).length, 4);
+});
+
+
+test('late verified transfer can only be approved when the original payment was timely and capacity is available', async t => {
+  const f = fixture(t), admin = await f.signIn();
+  f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  for (const who of ['a', 'b', 'c', 'd']) await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who));
+  const late = f.data.bookings.at(-1)!;
+  late.holdExpiresAt = new Date(Date.now() - 1000).toISOString();
+  const replacement = await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('e'));
+  assert.equal(replacement.status, 201);
+  const replacementId = (await replacement.json()).booking.id;
+  const upload = await pilotRequest(new Request('https://example.com/api/player/bookings/' + late.id + '/receipt', {
+    method: 'POST', headers: { ...f.player('d'), 'Content-Type': 'image/png' },
+    body: new Uint8Array([137,80,78,71,13,10,26,10,42]),
+  }), f.env, f.verify);
+  assert.equal(upload!.status, 201);
+  assert.equal(late.receipts![0].submittedAfterHold, true);
+  assert.equal(publicSession(f.data.sessions[0], f.data.bookings).joined, 4);
+  const reviewPath = '/api/marketplace/bookings/' + late.id + '/receipts/' + late.receipts![0].id + '/review';
+  const reviewBody = { action: 'approve', fundsChecked: true, transferReference: 'LATE-TRANSFER-0001', receivedAmount: 190 };
+  // Even a verified bank transfer must not displace a later buyer of the last seat.
+  late.receipts![0].verification = {
+    provider: 'slipok', status: 'verified', checkedAt: new Date().toISOString(),
+    amountSatang: late.amount, reference: 'LATETRANSFER0001',
+    transferredAt: new Date(Math.floor(Date.parse(late.createdAt) / 1000) * 1000).toISOString(),
+    message: 'fixture verified',
+  };
+  assert.equal((await f.request(reviewPath, reviewBody, admin)).status, 409);
+  assert.equal(late.paidAt, undefined);
+  assert.equal(late.receipts![0].status, 'pending');
+  // A refunded/cancelled replacement reopens capacity; manual recovery remains transactional.
+  assert.equal((await f.request('/api/player/bookings/' + replacementId + '/cancel', {}, f.player('e'))).status, 200);
+  assert.equal((await f.request(reviewPath, reviewBody, admin)).status, 200);
+  assert.ok(late.paidAt);
+  assert.equal(f.data.bookings.filter(activeBooking).length, 4);
+});
+
+test('late transfer made after the payment deadline can never be admitted automatically or manually', async t => {
+  const f = fixture(t), admin = await f.signIn();
+  f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
+  f.docs.set('worker-pilot', { bookingEnabled: true });
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
+  const row = f.data.bookings[0];
+  row.holdExpiresAt = new Date(Date.now() - 1000).toISOString();
+  const upload = await pilotRequest(new Request('https://example.com/api/player/bookings/' + id + '/receipt', {
+    method: 'POST', headers: { ...f.player('a'), 'Content-Type': 'image/png' },
+    body: new Uint8Array([137,80,78,71,13,10,26,10,43]),
+  }), f.env, f.verify);
+  assert.equal(upload!.status, 201);
+  const receipt = row.receipts![0];
+  receipt.verification = {
+    provider: 'slipok', status: 'verified', checkedAt: new Date().toISOString(),
+    amountSatang: row.amount, reference: 'LATEAFTERDEADLINE',
+    transferredAt: new Date(Date.parse(row.holdExpiresAt!) + 2000).toISOString(), message: 'fixture verified',
+  };
+  const url = '/api/marketplace/bookings/' + id + '/receipts/' + receipt.id + '/review';
+  assert.equal((await f.request(url, { action: 'approve', fundsChecked: true, receivedAmount: 190, transferReference: 'LATEAFTERDEADLINE' }, admin)).status, 409);
+  assert.equal(row.paidAt, undefined);
+  assert.equal(activeBooking(row), false);
+  assert.equal((await f.request('/api/marketplace/bookings/' + id + '/refund', {
+    action: 'cancel', reason: 'หลักฐานโอนหลังหมดเวลา ต้องตรวจเงินคืน', confirmCancellation: true,
+  }, admin)).status, 200);
+  assert.equal(row.refund?.status, 'review_required');
+});
+
+test('late receipt upload closes after 24 hours but leaves the original booking history', async t => {
+  const f = fixture(t); await f.signIn(); f.docs.set('worker-pilot', { bookingEnabled: true });
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
+  f.data.bookings[0].holdExpiresAt = new Date(Date.now() - 24 * 60 * 60 * 1000 - 1000).toISOString();
+  const response = await pilotRequest(new Request('https://example.com/api/player/bookings/' + id + '/receipt', {
+    method: 'POST', headers: { ...f.player('a'), 'Content-Type': 'image/png' },
+    body: new Uint8Array([137,80,78,71,13,10,26,10,44]),
+  }), f.env, f.verify);
+  assert.equal(response!.status, 410);
+  assert.equal(f.data.bookings.length, 1);
+  assert.equal(f.data.bookings[0].receipts, undefined);
 });
 
 test('admin repairs only currency parser failures from the same hashed image and still rejects reused transfers', async t => {
