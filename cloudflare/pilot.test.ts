@@ -249,7 +249,8 @@ test('late verified transfer can only be approved when the original payment was 
   f.docs.set('worker-pilot', { bookingEnabled: true });
   for (const who of ['a', 'b', 'c', 'd']) await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who));
   const late = f.data.bookings.at(-1)!;
-  late.holdExpiresAt = new Date(Date.now() - 1000).toISOString();
+  late.createdAt = new Date(Date.now() - 5 * 60 * 1000 - 1000).toISOString();
+  late.holdExpiresAt = new Date(Date.parse(late.createdAt) + 5 * 60 * 1000).toISOString();
   const replacement = await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('e'));
   assert.equal(replacement.status, 201);
   const replacementId = (await replacement.json()).booking.id;
@@ -285,7 +286,8 @@ test('late transfer made after the payment deadline can never be admitted automa
   f.docs.set('worker-pilot', { bookingEnabled: true });
   const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
   const row = f.data.bookings[0];
-  row.holdExpiresAt = new Date(Date.now() - 1000).toISOString();
+  row.createdAt = new Date(Date.now() - 5 * 60 * 1000 - 1000).toISOString();
+  row.holdExpiresAt = new Date(Date.parse(row.createdAt) + 5 * 60 * 1000).toISOString();
   const upload = await pilotRequest(new Request('https://example.com/api/player/bookings/' + id + '/receipt', {
     method: 'POST', headers: { ...f.player('a'), 'Content-Type': 'image/png' },
     body: new Uint8Array([137,80,78,71,13,10,26,10,43]),
