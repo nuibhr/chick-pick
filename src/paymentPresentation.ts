@@ -3,7 +3,7 @@ import type { StripePayment } from './paymentTypes';
 import { paymentHoldExpired } from './bookingHold';
 import { refundLabels, type PublicRefund } from './refundTypes';
 
-type Ticket = { refund?: PublicRefund | null; holdExpiresAt?: string | null; holdExpired?: boolean; cancelledAt?: string | null; paidAt?: string | null; kind?: string; completed?: boolean; admissionStatus?: string; stripe?: Pick<StripePayment, 'status'> | null; receipt?: Pick<ReceiptSubmission, 'status' | 'verification'> | null };
+type Ticket = { refund?: PublicRefund | null; holdExpiresAt?: string | null; holdExpired?: boolean; cancelledAt?: string | null; paidAt?: string | null; kind?: string; completed?: boolean; admissionStatus?: string; stripe?: Pick<StripePayment, 'status'> | null; receipt?: Pick<ReceiptSubmission, 'status' | 'verification' | 'submittedAfterHold'> | null };
 export function paymentTicketLabel(ticket: Ticket, now = Date.now()) {
   if (ticket.cancelledAt) return ticket.refund ? refundLabels[ticket.refund.status] : 'ยกเลิกแล้ว';
   if (paymentHoldExpired(ticket, now)) return ticket.receipt?.status === 'pending' && ticket.receipt.submittedAfterHold
