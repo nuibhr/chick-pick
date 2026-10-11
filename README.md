@@ -8,6 +8,12 @@ See [README-SLIPOK.md](README-SLIPOK.md) for the active payment setup and limita
 
 Owner-configurable bank and phone PromptPay channels support separate recipients, independent visibility, booking-time snapshots, copy actions and locally generated amount-prefilled PromptPay QR images. The bank channel can use its own bank-linked PromptPay mobile for amount-prefilled QR, with an uploaded static bank QR as a legacy fallback. Verified SlipOK results appear as a summary for funds confirmation; reference and amount entry is confined to legacy manual review. QR export supports native file sharing and a five-minute QR-only HTTPS page for Safari. See [PAYMENT-CHANNELS-2026-10-08.md](PAYMENT-CHANNELS-2026-10-08.md) for channel setup, [PAYMENT-EXPERIENCE-2026-10-08.md](PAYMENT-EXPERIENCE-2026-10-08.md) for mobile limitations and [BANK-PROMPTPAY-2026-10-08.md](BANK-PROMPTPAY-2026-10-08.md) for the latest 87-test validation and bank PromptPay setup.
 
+## Automated Testing & Isolated UAT
+
+GitHub Actions now runs `npm run lint`, `npm test` and `npm run build:cloudflare` for pull requests and relevant pushes. To run locally use `npm ci && npm test`. A separate manually gated workflow can deploy either a **UI-only, payment-disabled preview** or a **functional UAT** with its own TiDB `*_uat` schema, Cloudflare KV namespace and LINE channel. The original `chick-pick-tidb-staging` Worker is never a workflow deployment target. Do not deploy the late-slip PR to the original app before CI and mobile acceptance testing pass.
+
+See [Thai setup guide for CI, UI preview, staging secrets and two-player UAT](TESTING-AND-UAT-2026-10-11.md).
+
 ## Run locally
 
 New Open Play transfer bookings now hold one seat for five minutes. Pending uploaded slips retain the seat for admin review, and expired unpaid holds release capacity without entering pending revenue. Existing bookings are preserved. See [hold rules, concurrency tests and remaining mobile check](OPEN-PLAY-HOLD-2026-10-08.md).
