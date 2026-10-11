@@ -259,24 +259,25 @@ test('late verified transfer can only be approved when the original payment was 
     body: new Uint8Array([137,80,78,71,13,10,26,10,42]),
   }), f.env, f.verify);
   assert.equal(upload!.status, 201);
-  assert.equal(late.receipts![0].submittedAfterHold, true);
+  const lateAfterUpload = f.data.bookings.find(b => b.id === late.id)!;
+  assert.equal(lateAfterUpload.receipts![0].submittedAfterHold, true);
   assert.equal(publicSession(f.data.sessions[0], f.data.bookings).joined, 4);
-  const reviewPath = '/api/marketplace/bookings/' + late.id + '/receipts/' + late.receipts![0].id + '/review';
+  const reviewPath = '/api/marketplace/bookings/' + late.id + '/receipts/' + lateAfterUpload.receipts![0].id + '/review';
   const reviewBody = { action: 'approve', fundsChecked: true, transferReference: 'LATE-TRANSFER-0001', receivedAmount: 190 };
   // Even a verified bank transfer must not displace a later buyer of the last seat.
-  late.receipts![0].verification = {
+  lateAfterUpload.receipts![0].verification = {
     provider: 'slipok', status: 'verified', checkedAt: new Date().toISOString(),
     amountSatang: late.amount, reference: 'LATETRANSFER0001',
-    transferredAt: new Date(Math.floor(Date.parse(late.createdAt) / 1000) * 1000).toISOString(),
+    transferredAt: new Date(Date.parse(late.createdAt) + 1000).toISOString(),
     message: 'fixture verified',
   };
   assert.equal((await f.request(reviewPath, reviewBody, admin)).status, 409);
-  assert.equal(late.paidAt, undefined);
-  assert.equal(late.receipts![0].status, 'pending');
+  assert.equal(f.data.bookings.find(b => b.id === late.id)!.paidAt, undefined);
+  assert.equal(f.data.bookings.find(b => b.id === late.id)!.receipts![0].status, 'pending');
   // A refunded/cancelled replacement reopens capacity; manual recovery remains transactional.
   assert.equal((await f.request('/api/player/bookings/' + replacementId + '/cancel', {}, f.player('e'))).status, 200);
   assert.equal((await f.request(reviewPath, reviewBody, admin)).status, 200);
-  assert.ok(late.paidAt);
+  assert.ok(f.data.bookings.find(b => b.id === late.id)!.paidAt);
   assert.equal(f.data.bookings.filter(activeBooking).length, 4);
 });
 
@@ -293,7 +294,7 @@ test('late transfer made after the payment deadline can never be admitted automa
     body: new Uint8Array([137,80,78,71,13,10,26,10,43]),
   }), f.env, f.verify);
   assert.equal(upload!.status, 201);
-  const receipt = row.receipts![0];
+  const receipt = f.data.bookings.find(b => b.id === id)!.receipts![0];
   receipt.verification = {
     provider: 'slipok', status: 'verified', checkedAt: new Date().toISOString(),
     amountSatang: row.amount, reference: 'LATEAFTERDEADLINE',
@@ -301,16 +302,17 @@ test('late transfer made after the payment deadline can never be admitted automa
   };
   const url = '/api/marketplace/bookings/' + id + '/receipts/' + receipt.id + '/review';
   assert.equal((await f.request(url, { action: 'approve', fundsChecked: true, receivedAmount: 190, transferReference: 'LATEAFTERDEADLINE' }, admin)).status, 409);
-  assert.equal(row.paidAt, undefined);
-  assert.equal(activeBooking(row), false);
+  assert.equal(f.data.bookings.find(b => b.id === id)!.paidAt, undefined);
+  assert.equal(activeBooking(f.data.bookings.find(b => b.id === id)!), false);
   assert.equal((await f.request('/api/marketplace/bookings/' + id + '/refund', {
     action: 'cancel', reason: 'หลักฐานโอนหลังหมดเวลา ต้องตรวจเงินคืน', confirmCancellation: true,
   }, admin)).status, 200);
-  assert.equal(row.refund?.status, 'review_required');
+  assert.equal(f.data.bookings.find(b => b.id === id)!.refund?.status, 'review_required');
 });
 
 test('late receipt upload closes after 24 hours but leaves the original booking history', async t => {
   const f = fixture(t); await f.signIn(); f.docs.set('worker-pilot', { bookingEnabled: true });
+  f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' });
   const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
   f.data.bookings[0].holdExpiresAt = new Date(Date.now() - 24 * 60 * 60 * 1000 - 1000).toISOString();
   const response = await pilotRequest(new Request('https://example.com/api/player/bookings/' + id + '/receipt', {
