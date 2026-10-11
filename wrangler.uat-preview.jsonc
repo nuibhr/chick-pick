@@ -1,0 +1,14 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "chick-pick-ui-sandbox",
+  "preview_urls": false,
+  "workers_dev": true,
+  "main": "cloudflare/preview.js",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist-client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  }
+}
