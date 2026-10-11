@@ -41,7 +41,7 @@ jobs:
         run: npm run lint
 
       - name: Run all regression tests before any deployment
-        run: node --import tsx --test cloudflare/*.test.ts server/*.test.ts src/*.test.ts
+        run: npm test
 
       - name: Check public assets and build
         run: npm run build:cloudflare
