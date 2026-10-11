@@ -68,6 +68,12 @@ jobs:
           UAT_SLIPOK_BRANCH_ID: ${{ vars.UAT_SLIPOK_BRANCH_ID }}
         run: node scripts/prepareUatDeployment.mjs
 
+      - name: Initialize isolated UAT TiDB schema (not production)
+        if: inputs.target == 'isolated-uat'
+        env:
+          TIDB_DATABASE_URL: ${{ secrets.UAT_TIDB_DATABASE_URL }}
+        run: npm run db:migrate
+
       - name: Deploy safe UI-only preview (no payments or database)
         if: inputs.target == 'ui-only'
         env:
