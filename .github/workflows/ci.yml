@@ -40,7 +40,7 @@ jobs:
         run: npm run lint
 
       - name: Automated unit and integration tests
-        run: node --import tsx --test cloudflare/*.test.ts server/*.test.ts src/*.test.ts
+        run: npm test
 
       - name: Secure Cloudflare frontend build
         run: npm run build:cloudflare
