@@ -1,9 +1,8 @@
 import type { ReceiptSubmission, TransferAccount } from './marketplaceTypes';
 import { stripeLocksPayment } from './paymentTypes';
-import { receiptProtectsHold } from './receiptHoldPolicy';
-export type Coach = { id: string; management?: import('./catalogManagementTypes').CatalogManagement; name: string; initials: string; specialty: string; bio: string; venue: string; hourlyRate: number; active?: boolean; bookingFee?: number; bookingReady?: boolean; courses: { id: string; name: string; hours: number; price: number }[] };
+export type Coach = { id: string; management?: import('./catalogManagementTypes').CatalogManagement; name: string; initials: string; specialty: string; bio: string; venue: string; hourlyRate: number: number; active?: boolean; bookingFee?: number; bookingReady?: boolean; courses: { id: string; name: string; hours: number; price: number }[] };
 export type Lesson = { id: string; slotId?: string; start: string; hours: number; status: 'scheduled' | 'completed' | 'cancelled' };
 export type CoachSlot = { id: string; management?: import('./catalogManagementTypes').CatalogManagement; coachId: string; start: string; hours: number; price: number; status: 'open' | 'blocked' | 'booked'; bookingReady?: boolean };
 export type Enrollment = { id: string; coachId: string; student: string; phone: string; title: string; totalHours: number; amount: number; payment: 'pending' | 'paid'; paymentMethod?: string; paidAt?: string; createdAt: string; lessons: Lesson[]; playerId?: string; venue?: string; cancelledAt?: string; refund?: import('./refundTypes').BookingRefund; transferAccount?: TransferAccount; receipts?: ReceiptSubmission[]; bookingFee?: number; holdExpiresAt?: string; stripe?: import('./paymentTypes').StripePayment };
-export const lessonHoldExpired = (e: Enrollment) => Boolean(e.holdExpiresAt && Date.parse(e.holdExpiresAt) <= Date.now() && e.payment !== 'paid' && !receiptProtectsHold(e.receipts?.at(-1)) && !stripeLocksPayment(e.stripe));
+export const lessonHoldExpired = (e: Enrollment) => Boolean(e.holdExpiresAt && Date.parse(e.holdExpiresAt) <= Date.now() && e.payment !== 'paid' && e.receipts?.at(-1)?.status !== 'pending' && !stripeLocksPayment(e.stripe));
 export type CoachingState = { coaches: Coach[]; enrollments: Enrollment[]; slots: CoachSlot[]; demo: boolean };
