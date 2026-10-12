@@ -18,6 +18,8 @@ See [Thai setup guide for CI, UI preview, staging secrets and two-player UAT](TE
 
 New Open Play transfer bookings now hold one seat for five minutes. Pending uploaded slips retain the seat for admin review, and expired unpaid holds release capacity without entering pending revenue. Existing bookings are preserved. See [hold rules, concurrency tests and remaining mobile check](OPEN-PLAY-HOLD-2026-10-08.md).
 
+A post-expiry transfer slip can be submitted as evidence within 24 hours without reclaiming an already released seat. Staff must verify the original transfer time and current capacity before any manual recovery, otherwise reconcile and refund. See [late slip recovery and staging checklist](LATE-SLIP-RECOVERY-2026-10-10.md).
+
 Requires Node.js 22 or newer.
 
 ```sh

@@ -5,6 +5,7 @@ import type { ReceiptKV } from './pilot';
 import { fail } from './pilotDomain';
 import { verifySlipOk, slipokConfigured, type SlipOkEnv, type SlipVerification } from './slipok';
 import { needsCurrencyRecheck, needsReceiverRecheck } from '../src/slipokCompatibility';
+import { rejectedNonPaymentImage } from '../src/receiptHoldPolicy';
 import { digest } from './pilotAuth';
 
 function pendingReceipt(docs: FinanceDocuments, kind: 'game' | 'coaching', id: string, receiptId: string) {
@@ -35,7 +36,9 @@ export async function checkStoredReceipt(db: TidbDocuments, env: SlipOkEnv & { R
   try {
     const image = await env.RECEIPTS!.get('receipt:' + receiptId, 'arrayBuffer');
     if (!image) throw Error('missing image');
-    if (input.recovery && await digest(new Uint8Array(image)) !== input.sha256) throw Error('image changed');
+    // New uploads always have a hash. Check it for every verification, not only
+    // parser repairs. Missing legacy hashes remain subject to existing policy.
+    if (input.sha256 && await digest(new Uint8Array(image)) !== input.sha256) throw Error('image changed');
     result = await verifySlipOk(env, image, input.mimeType, input.amount, input.account, input.bookedAt, fetch, input.recovery);
   } catch { result = { provider: 'slipok', status: 'retry', checkedAt: new Date().toISOString(), retryAt: new Date(Date.now() + 60000).toISOString(), message: 'ภาพหรือบริการตรวจยังไม่พร้อม กรุณาตรวจใหม่' }; }
   return db.updateFinance(docs => {
@@ -48,6 +51,16 @@ export async function checkStoredReceipt(db: TidbDocuments, env: SlipOkEnv & { R
     }
     if (input.currencyRecovery && ['retry', 'unavailable'].includes(result.status)) result.currencyRecovery = true;
     if (input.receiverRecovery && ['retry', 'unavailable'].includes(result.status)) result.receiverRecovery = true;
-    p.receipt.verification = result; return result;
+    p.receipt.verification = result;
+    if (rejectedNonPaymentImage(p.receipt)) {
+      // Reject only the image, not an alleged transfer. Preserve the private
+      // bytes and history; do not mark no_funds, cancel, approve, refund or renew
+      // the hold. The original deadline then applies and resubmission can follow
+      // the existing eligibility rules. Ambiguous bank results remain pending.
+      p.receipt.status = 'rejected';
+      p.receipt.rejectReason = 'SlipOK: ' + result.message;
+      p.receipt.reviewedAt = result.checkedAt;
+    }
+    return result;
   }, { ...audit, action: 'slipok.check.completed' });
 }

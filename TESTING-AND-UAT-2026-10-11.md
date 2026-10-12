@@ -1,94 +1,93 @@
-# Chick&Pick — Automated Tests & Isolated UAT (11 ต.ค. 2569)
+# Chick&Pick - Automated Testing and Isolated UAT
 
-เอกสารนี้ใช้กับ repository `nuibhr/chick-pick` และการแก้ไขสลิปย้อนหลังใน PR #1 ระบบ **ยังไม่ Deploy การแก้ไขขึ้น Worker เดิม** การเปลี่ยนแปลง Source บน `main` ในชุดนี้จำกัดอยู่ที่เครื่องมือทดสอบและการเตรียม Preview/UAT
+Updated 12 October 2026. This guide supersedes the original 11 October setup instructions. The preflight patch is on `audit/preflight-20261012`; no production deployment is authorized by a passing test.
 
-## 1) ระบบ CI อัตโนมัติ
+## Release status
 
-GitHub Actions: [Chick&Pick CI](https://github.com/nuibhr/chick-pick/actions/workflows/ci.yml)
+**Do not release publicly yet.** The patch covers UAT initialization, owner-code validation, definite invalid-image handling, stored-image integrity, session revocation, and additional validation. Duplicate SlipOK responses after an uncertain network outcome and evidence received after cancellation, closed settlement, or coaching expiry still require a separately reviewed reconciliation workflow. See `SECURITY-PREFLIGHT-FIXES-2026-10-12.md`.
 
-ทุกครั้งที่ Push ไปยัง `main`, `fix/**`, `feat/**`, `chore/**` หรือมี PR เข้าสู่ `main` ระบบจะ:
+## Automated checks
 
-1. `npm ci` ตาม `package-lock.json` บน Node.js 22
-2. `npm run lint` ตรวจ TypeScript ของระบบปัจจุบัน (ไม่รวม `server.ts` ซึ่งเป็น entry point รุ่นเก่าที่ต้องพึ่งไฟล์ mock ซึ่งไม่ได้อยู่ใน Git)
-3. `npm test` รัน Cloudflare + Server + React/logic + UAT isolation guard regression tests
-4. `npm run build:cloudflare` ตรวจ public assets และ build frontend
-5. แสดง PASS/FAIL ผ่านหน้า Actions / Pull Request; ถ้าไม่ผ่าน ห้าม Deploy เวอร์ชันนั้น
+[Chick&Pick CI](https://github.com/nuibhr/chick-pick/actions/workflows/ci.yml) runs on the configured branches and pull requests to main:
 
-ทุก Test ใช้ fixtures/mocks ไม่ใช้ TiDB จริง ไม่โอนเงิน ไม่ส่งสลิปให้ SlipOK จริง และไม่ Deploy อัตโนมัติ
+1. Locked dependency installation and TypeScript validation.
+2. `npm test`: unit/integration tests using fixtures and mocked external services.
+3. `node scripts/preflightRegressionProof.mjs`: selected identical tests against the original and patched source, with benign controls, plus verification that the original audit baseline retained the pinned main contributions.
+4. `npm run build:cloudflare`: public-asset check and frontend build.
+5. Pinned Wrangler backend compilation using `--dry-run` and a local `workerd` smoke test. The local audit configuration has no database, LINE, payment or customer-image bindings. It checks startup, protected paths, headers and fail-closed behavior, not real payment processing.
+6. A separate `npm audit --package-lock-only --audit-level=high` job checks known advisories without changing dependencies. A clean advisory result is not a full source-code or supply-chain certification.
 
-## 2) มี Preview สองระดับ
+Wrangler is pinned to `4.149.0`; the previously tried `4.102.0` could compile but its bundled runtime did not support compatibility date `2026-10-01`. The app's compatibility date was not reduced to conceal this mismatch.
 
-| ประเภท | Cloudflare Worker | ฐานข้อมูล/การรับเงินจริง | เปิดด้วย |
-| --- | --- | --- | --- |
-| UI-only | `chick-pick-ui-sandbox` | ไม่เชื่อม DB, **ปิด API จอง/ชำระเงิน/แอดมินทั้งหมด** | `wrangler.uat-preview.jsonc` |
-| Functional UAT | `chick-pick-uat-isolated` | **TiDB schema แยก + Cloudflare KV แยก + LINE channel แยก** | `scripts/prepareUatDeployment.mjs` |
+CI does not deploy. A green job does not enforce branch protection: the owner must separately verify available GitHub protections, required checks, and reviewer restrictions for this private repository.
 
-ทั้งสองต้องกด Deploy ด้วยตัวเองใน [Chick&Pick Test Deploy](https://github.com/nuibhr/chick-pick/actions/workflows/deploy-test.yml) และ **ไม่มี workflow อัตโนมัติใด Deploy ขึ้น Worker เดิม** (`chick-pick-tidb-staging`)
+## Two manually requested test deployment targets
 
-> UI-only ดูหน้าเว็บ/ดีไซน์ได้ แต่เพราะ API ด้านธุรกรรมถูกปิด จึงไม่สามารถยืนยันขั้นตอนการจองจริงผ่าน UI-only ได้ ต้องใช้ Functional UAT พร้อมข้อมูลทดสอบที่แยกทั้งหมด
+| Target | Worker | Purpose |
+| --- | --- | --- |
+| `ui-only` | `chick-pick-ui-sandbox` | Static UI preview; booking, payment and administrative transaction APIs disabled |
+| `isolated-uat` | `chick-pick-uat-isolated` | Functional UAT using separate TiDB schema, receipt KV and LINE configuration |
 
-## 3) เปิด UI-only Preview ครั้งแรก (ง่ายที่สุด)
+The [Test Deploy workflow](https://github.com/nuibhr/chick-pick/actions/workflows/deploy-test.yml) is manual. Neither target is the original `chick-pick-tidb-staging` Worker. Do not map production routes to a test Worker.
 
-1. ไป GitHub → Repository → **Settings → Environments** → เพิ่ม Environment ชื่อ `chick-pick-uat`. แนะนำเปิด Required reviewers และ จำกัด deployment branches เป็น `main` กับ `fix/late-slip-evidence-20261010`.
-2. เพิ่ม Secrets ภายใต้ Environment เดียวกัน:
-   - `UAT_CLOUDFLARE_API_TOKEN` — Token Cloudflare ที่มีสิทธิ์แก้ไข Workers ของบัญชีที่เลือกเท่านั้น
-   - `UAT_CLOUDFLARE_ACCOUNT_ID` — Account ID ของบัญชี Cloudflare
-3. เปิด [Chick&Pick Test Deploy](https://github.com/nuibhr/chick-pick/actions/workflows/deploy-test.yml) → **Run workflow** → เลือก Branch `fix/late-slip-evidence-20261010` → `target = ui-only` → Run.
-4. รอขั้นตอน `npm test` และ Build ผ่าน แล้วดู URL `workers.dev` ใน log ของขั้น Deploy. URL นี้เปิดบน iPhone ได้ และไม่เชื่อมฐานข้อมูลหรือบัญชีรับโอน
+## Owner setup for UI-only preview
 
-อย่าส่ง Token, Pairing Token หรือ Database URL มาใน Chat หรือ Commit ใส่ Git
+Create GitHub Environment `chick-pick-uat`. Where the account plan supports them, enable required reviewers and restrict deployment branches; verify these settings actually take effect. Add environment secrets `UAT_CLOUDFLARE_API_TOKEN` and `UAT_CLOUDFLARE_ACCOUNT_ID`. Prefer an isolated test account and minimally scoped token. Do not send tokens in chat or commit them.
 
-## 4) เพิ่ม Functional UAT สำหรับการจองและทดสอบสลิปจริง
+After code review and successful checks, an authorized owner may select the reviewed branch in Test Deploy, choose `ui-only`, and run it. The resulting URL is available only after the deployment step succeeds. UI-only cannot demonstrate an end-to-end booking or payment.
 
-ก่อนกด `target = isolated-uat` ต้องสร้าง Resource **สำหรับทดสอบเท่านั้น**:
+## Functional UAT resources
 
-- **TiDB**: สร้างฐานข้อมูลแยก เช่น `chick_pick_uat` และ DB user ที่มีสิทธิ์เฉพาะ schema นี้ ห้ามใช้ database URL production ระบบจะตรวจชื่อฐานข้อมูลต้องมี segment `uat`. Workflow จะ Run migration เฉพาะ URL ของ UAT โดยอัตโนมัติ
-- **Cloudflare KV**: สร้าง Namespace ใหม่สำหรับ Receipt ของ UAT แล้วคัดลอก Namespace ID (32 หลัก hex) คนละตัวกับ `wrangler.tidb.jsonc`; ระบบจะตรวจและปฏิเสธการใช้ KV ID ของ Worker เดิม
-- **LINE Developers**: สร้าง LINE Login Channel และ LIFF App สำหรับ UAT แยกจากของจริง ตั้ง LIFF Endpoint เป็น `https://chick-pick-uat-isolated.<workers-subdomain>.workers.dev/miniapp` และอนุญาต LINE test accounts ตามเงื่อนไข channel
-- **Cloudflare Worker URL**: ใช้ Worker ชื่อ `chick-pick-uat-isolated` เท่านั้น ไม่ใช้ชื่อ `chick-pick-tidb-staging` และห้าม map route/โดเมน production ไปยัง UAT
-- **SlipOK**: เริ่ม UAT โดย **ไม่ใส่** `UAT_SLIPOK_API_KEY` และ `UAT_SLIPOK_BRANCH_ID` ได้ จะเป็นการแนบหลักฐานและตรวจแบบ manual. ถ้าต้องทดสอบ SlipOK จริง ให้กำหนดคู่ค่าเหล่านี้ใน UAT ด้วยความระมัดระวัง การเรียกตรวจสลิปอาจใช้โควตาจริง และควรใช้บัญชีรับโอนที่จัดไว้สำหรับทดสอบ
+Prepare a separate database such as `chick_pick_uat`, a database user restricted to that schema, a separate Cloudflare KV namespace, and a distinct LINE channel and LIFF app for test users. Set the LIFF endpoint to the test Worker's `/miniapp` URL. Configure no production receiving account by default.
 
-เพิ่มค่าต่อไปนี้ที่ GitHub Environment `chick-pick-uat`:
+Configuration guards compare Worker/KV/LINE identifiers against the checked-in original configuration and require a UAT-named schema. **These checks cannot prove remote IAM isolation, account grants, or which resources a broadly scoped token can access. Verify those in the service consoles.**
 
-**Secrets (ห้ามใส่ในไฟล์ Git หรือส่งใน Chat)**
+### GitHub Environment secrets
 
-| ชื่อ | ความหมาย |
+| Name | Value |
 | --- | --- |
-| `UAT_CLOUDFLARE_API_TOKEN` | Cloudflare API Token สำหรับ Deploy Worker ทดสอบ |
-| `UAT_CLOUDFLARE_ACCOUNT_ID` | Cloudflare Account ID |
-| `UAT_TIDB_DATABASE_URL` | URL ฐานข้อมูล schema `*_uat` พร้อม DB user แยก |
-| `UAT_ADMIN_SESSION_SECRET` | สตริงสุ่มใหม่อย่างน้อย 32 ตัวอักษร |
-| `UAT_ADMIN_PAIRING_TOKEN` | รหัสผูกเจ้าของใหม่สำหรับ UAT อย่างน้อย 12 ตัวอักษร |
-| `UAT_SLIPOK_API_KEY` (ไม่บังคับ) | API key สำหรับทดลอง SlipOK เท่านั้น |
+| `UAT_CLOUDFLARE_API_TOKEN` | Minimal deployment token for the test account/resources |
+| `UAT_CLOUDFLARE_ACCOUNT_ID` | Intended Cloudflare test account |
+| `UAT_TIDB_DATABASE_URL` | Complete mysql connection URL for the separate UAT schema/user, without query overrides or fragments |
+| `UAT_ADMIN_SESSION_SECRET` | Newly generated secret of at least 32 characters |
+| `UAT_ADMIN_PAIRING_TOKEN` | Newly generated **exactly 12 ASCII letters/digits**; normalized to uppercase before storage, matching the real pairing API |
+| `UAT_SLIPOK_API_KEY` | Optional; only alongside the matching UAT SlipOK branch ID |
 
-**Variables**
+### GitHub Environment variables
 
-| ชื่อ | ความหมาย |
+| Name | Value |
 | --- | --- |
-| `UAT_KV_NAMESPACE_ID` | Namespace ID ของ KV ทดสอบเท่านั้น |
-| `UAT_LINE_CHANNEL_ID` | Channel ID ของ LINE UAT |
-| `UAT_LIFF_ID` | LIFF ID ของ UAT Channel |
-| `UAT_PUBLIC_APP_URL` | `https://chick-pick-uat-isolated.<workers-subdomain>.workers.dev` |
-| `UAT_SLIPOK_BRANCH_ID` (ไม่บังคับ) | Branch ID ของ SlipOK UAT ต้องมีคู่กับ API key |
+| `UAT_KV_NAMESPACE_ID` | Separate 32-hex-character receipt KV namespace ID |
+| `UAT_LINE_CHANNEL_ID` | Separate LINE channel ID |
+| `UAT_LIFF_ID` | LIFF ID belonging to that test channel |
+| `UAT_PUBLIC_APP_URL` | HTTPS root `https://chick-pick-uat-isolated.<workers-subdomain>.workers.dev`, without extra path/query/port |
+| `UAT_SLIPOK_BRANCH_ID` | Optional 1-10 digit branch ID, supplied together with its API key |
 
-จากนั้นเปิด Test Deploy → เลือก Branch ที่ต้องการ → เลือก `isolated-uat` → Run. Workflow จะ **ตรวจโค้ด → Test → Build → ตรวจแยก resource → Migrate UAT DB → Deploy Worker UAT → HTTP smoke test** โดยไม่แก้ Worker เดิม
+The former instruction allowing a 12-128-character pairing code was wrong: many such codes could not pass the real authentication endpoint. Do not reuse the fixture tokens from tests.
 
-ไฟล์ `.wrangler-uat.jsonc` และ `.wrangler-uat.secrets.json` เกิดเพียงชั่วคราวใน GitHub runner, ถูก ignore จาก Git และถูกลบท้าย workflow
+### Fresh database initialization
 
-## 5) ขั้นตอน Acceptance Test ก่อนพิจารณา Merge PR #1
+The functional workflow now runs `node --import tsx server/migrateUat.ts`, not the old table-only migration command. It checks `SELECT DATABASE()` before any writes, creates required tables, and uses `INSERT IGNORE` for:
 
-1. สร้าง Open Play รอบทดลองใน UAT ให้เหลือที่นั่งสุดท้าย 1 ที่ ด้วย LINE A และ LINE B ซึ่งเป็น **test accounts คนละบัญชี**
-2. A จองก่อนเวลา 5 นาที, จำลองว่าโอนในเวลาที่กำหนด, ให้เวลาล็อกหมด แล้ว B จองที่นั่งสุดท้าย ตรวจว่า B ได้ที่นั่ง แต่ A ยังส่ง **หลักฐานย้อนหลัง** ได้
-3. ฝั่งแอดมินต้องเห็นสลิป A แม้ที่นั่งหมด แต่ห้ามอนุมัติคืนที่นั่ง A อัตโนมัติ; ต้องแจ้งว่าต้องตรวจสอบ/ประสานคืนเงิน
-4. หลังคืนที่ว่างแบบทดสอบ ให้ฝ่ายการเงินอนุมัติ A ได้ก็ต่อเมื่อตรวจเวลาธุรกรรมจริงจาก SlipOK ว่าอยู่ในช่วงเดิม, ยอดตรง, ผู้รับตรง, รายการไม่ซ้ำ และยืนยันเงินเข้าจริง
-5. สลิปที่โอนหลังเวลา, สลิปซ้ำ, ส่งเกิน 24 ชั่วโมง และสลิปที่อัปโหลดระหว่างมีคนแย่งที่นั่ง ต้องไม่ทำให้เกิด **overbooking** หรือบันทึกรายรับซ้ำ
-6. ทดสอบหน้า iPhone ผ่าน LINE LIFF และแอดมิน รวมถึงประวัติการจอง, สถานะคืนเงิน, สิทธิ์แสดงหลักฐาน และการปิดยอดเมื่อมีเรื่องรอตรวจ
+- `marketplace`: empty sessions/bookings/profiles;
+- `worker-pilot`: booking disabled, manual transfer mode.
 
-อย่าโอนเงินจริงใน UAT โดยไม่ตกลงกับผู้ดูแลบัญชีและฝ่ายการเงินล่วงหน้า; Unit Tests ไม่จำเป็นต้องใช้เงินจริง
+Existing records and settings are preserved. Retrying an interrupted initialization does not reset bookings. Malformed existing marketplace data causes an error rather than silent replacement. A UAT-like database name is still not proof of least-privilege grants.
 
-## 6) ข้อจำกัด
+After initialization, the owner must pair LINE and configure test venues, sessions and receiving channels. A fresh database does not contain an owner, receiving account, or an automatically enabled public booking service.
 
-- โค้ดและ Workflow อยู่ใน GitHub แล้ว **แต่การ Deploy จะเกิดขึ้นต่อเมื่อมี Cloudflare credentials และผู้มีสิทธิ์กด Run**; ไม่สามารถรับรองว่ามี URL ใหม่ใช้งานได้ก่อนรันสำเร็จ
-- ค่าของ GitHub Environment Secrets และ Resource ของผู้ใช้ไม่สามารถอ่าน/สร้างจาก GitHub connector นี้ได้ จึงต้องตั้งผ่าน Cloudflare, TiDB, LINE Developers และ GitHub Settings ด้วยบัญชีเจ้าของ
-- GitHub Actions ตรวจ fixture และ API แบบจำลองได้ แต่ **ไม่แทนการทดสอบ LINE mobile + SlipOK + ธนาคารจริง**
-- PR #1 ยังต้องผ่านการตรวจสอบโค้ดและทดสอบทั้งหมดก่อน Merge; ห้ามเปลี่ยน endpoint production จนกว่าจะลงนามรับผล UAT
+The generated `.wrangler-uat.jsonc` and `.wrangler-uat.secrets.json` are ignored by Git and deleted at the end of the workflow. No real credentials were needed for unit tests or local Worker smoke tests.
+
+## Payment acceptance testing
+
+Begin without SlipOK credentials for UI and manual-evidence checks. Actual SlipOK testing can consume real quota; testing a real transfer requires prior agreement with the receiving-account owner and a reconciliation/refund plan. Fixtures must never be presented as real money.
+
+Use two distinct authorized LINE test identities for the last seat. Test on-time evidence, late evidence, another player's replacement booking, invalid images, duplicate transactions, bank delays, changed bytes, owner/staff permissions, and attempted replay of a cookie after logout. Confirm no automatic reassignment of another player's seat, no duplicate income and no deletion of evidence.
+
+Definite invalid-image codes 1005-1008 now reject the image without extending the original hold or claiming that no money exists. Ambiguous bank outcomes are not automatically treated as unpaid. Historical rejected-verification/pending records were not bulk-migrated in this patch; review them individually.
+
+Do not treat expired coaching, cancelled bookings or already-closed settlements as fully solved. They remain release-blocking reconciliation cases, not reasons to remove the existing cancellation, capacity or financial-history safeguards.
+
+## Boundaries of the available evidence
+
+Unit tests mock TiDB and SlipOK; local workerd smoke tests use no configured external services. Neither proves real TiDB grants/locking under load, LINE device behavior, receipt KV propagation, live bank outcomes, backups/restores, monitoring or full secret-history hygiene. Actual hosted UAT and owner approval are still required. No production Worker, customer booking, bank approval, settlement or refund is changed by running the automated checks.

@@ -22,30 +22,32 @@ concurrency:
 jobs:
   test-and-deploy:
     name: Verify and deploy test Worker only
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/late-slip-evidence-20261010'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/late-slip-evidence-20261010' || github.ref == 'refs/heads/audit/preflight-20261012'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: chick-pick-uat
+    env:
+      WRANGLER_SEND_METRICS: 'false'
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
           cache: npm
-
+      - name: Check known dependency advisories
+        run: npm audit --package-lock-only --audit-level=high --registry=https://registry.npmjs.org
       - name: Install reproducible dependencies
         run: npm ci --no-audit --no-fund
-
       - name: Typecheck
         run: npm run lint
-
       - name: Run all regression tests before any deployment
         run: npm test
-
       - name: Check public assets and build
         run: npm run build:cloudflare
-
+      - name: Check backend compilation without uploading
+        run: npx --yes wrangler@4.149.0 deploy --dry-run --config wrangler.audit.jsonc --outdir /tmp/chick-pick-worker-build
       - name: Check dedicated Cloudflare deployment credentials
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.UAT_CLOUDFLARE_API_TOKEN }}
@@ -53,7 +55,6 @@ jobs:
         run: |
           test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Missing UAT_CLOUDFLARE_API_TOKEN in chick-pick-uat environment'; exit 1; }
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Missing UAT_CLOUDFLARE_ACCOUNT_ID in chick-pick-uat environment'; exit 1; }
-
       - name: Prepare isolated TiDB, KV, LINE, and Worker bindings
         if: inputs.target == 'isolated-uat'
         env:
@@ -67,31 +68,27 @@ jobs:
           UAT_PUBLIC_APP_URL: ${{ vars.UAT_PUBLIC_APP_URL }}
           UAT_SLIPOK_BRANCH_ID: ${{ vars.UAT_SLIPOK_BRANCH_ID }}
         run: node scripts/prepareUatDeployment.mjs
-
-      - name: Initialize isolated UAT TiDB schema (not production)
+      - name: Initialize and validate isolated UAT database
         if: inputs.target == 'isolated-uat'
         env:
           TIDB_DATABASE_URL: ${{ secrets.UAT_TIDB_DATABASE_URL }}
-        run: npm run db:migrate
-
+        run: node --import tsx server/migrateUat.ts
       - name: Deploy safe UI-only preview (no payments or database)
         if: inputs.target == 'ui-only'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.UAT_CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.UAT_CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          npx --yes wrangler@4 deploy --config wrangler.uat-preview.jsonc
+          npx --yes wrangler@4.149.0 deploy --config wrangler.uat-preview.jsonc
           echo 'UI-only preview deployed; all booking, payment and admin APIs remain disabled.' >> "$GITHUB_STEP_SUMMARY"
-
       - name: Deploy isolated functional UAT (never production Worker)
         if: inputs.target == 'isolated-uat'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.UAT_CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.UAT_CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          npx --yes wrangler@4 deploy --config .wrangler-uat.jsonc --secrets-file .wrangler-uat.secrets.json
+          npx --yes wrangler@4.149.0 deploy --config .wrangler-uat.jsonc --secrets-file .wrangler-uat.secrets.json
           echo 'Functional UAT deployed under chick-pick-uat-isolated, not the original Worker.' >> "$GITHUB_STEP_SUMMARY"
-
       - name: Smoke check isolated backend and LINE configuration
         if: inputs.target == 'isolated-uat'
         env:
@@ -100,7 +97,6 @@ jobs:
         run: |
           node scripts/uatSmoke.mjs
           echo 'UAT health and player configuration verified. Test booking and SlipOK manually with two LINE identities.' >> "$GITHUB_STEP_SUMMARY"
-
       - name: Erase temporary UAT config and secrets
         if: always()
         run: rm -f .wrangler-uat.jsonc .wrangler-uat.secrets.json
