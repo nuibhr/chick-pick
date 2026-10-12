@@ -20,15 +20,16 @@ function git(args) {
   assert.equal(result.status, 0, result.stderr);
   return result.stdout;
 }
+const workflowLines = value => value.split('\n').map(line => line.trimEnd()).filter(line => line.trim()).join('\n');
 
-// All main-side changes were authored after the shared ancestor. Ensure the
-// audited starting point already contains them; README may additionally contain
-// the late-slip documentation, so verify each main-added line there.
+// The historical workflow copies differ only in blank lines. Preserve leading
+// indentation and every substantive line; do not silently accept other changes.
 const mainPaths = git(['diff', '--name-only', common, main]).trim().split('\n').filter(Boolean);
 for (const file of mainPaths) {
   const left = git(['show', main + ':' + file]).trim();
   const carried = git(['show', base + ':' + file]).trim();
   if (left === carried) continue;
+  if (file.endsWith('.yml') && workflowLines(left) === workflowLines(carried)) continue;
   assert.equal(file, 'README.md', 'Unreviewed main difference: ' + file);
   const added = git(['diff', '--unified=0', common, main, '--', file]).split('\n')
     .filter(line => line.startsWith('+') && !line.startsWith('+++')).map(line => line.slice(1)).filter(line => line.trim());
