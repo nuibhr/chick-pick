@@ -29,6 +29,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Set up Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -40,6 +41,8 @@ jobs:
         run: npm run lint
       - name: Automated unit and integration tests
         run: npm test
+      - name: Prove baseline safety failures and preserved main contributions
+        run: node scripts/preflightRegressionProof.mjs
       - name: Secure Cloudflare frontend build
         run: npm run build:cloudflare
       - name: Compile backend with Wrangler without uploading
