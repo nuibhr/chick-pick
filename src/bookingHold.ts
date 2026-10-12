@@ -1,5 +1,4 @@
 import type { StripePayment } from './paymentTypes';
-import { receiptProtectsHold, type ReceiptHoldEvidence } from './receiptHoldPolicy';
 
 export const OPEN_PLAY_HOLD_MS = 5 * 60 * 1000;
 export const LATE_RECEIPT_EVIDENCE_MS = 24 * 60 * 60 * 1000;
@@ -8,17 +7,16 @@ export const expiredHoldMessage = 'หมดเวลาถือที่นั
 type Hold = {
   holdExpiresAt?: string | null; holdExpired?: boolean;
   cancelledAt?: string | null; paidAt?: string | null; payment?: string; admissionStatus?: string;
-  receipts?: ReceiptHoldEvidence[]; receipt?: ReceiptHoldEvidence | null;
+  receipts?: { status: string; submittedAfterHold?: boolean }[]; receipt?: { status: string; submittedAfterHold?: boolean } | null;
   stripe?: Pick<StripePayment, 'status'> | null;
 };
 
-// Evidence whose money status is unresolved retains its existing protection.
-// Definitively invalid/non-payment images do not extend the original deadline.
-// Neither this function nor expiry deletes evidence or decides that no money exists.
+// Uploaded evidence keeps the seat until an administrator resolves it. Old
+// bookings without a deadline and historical Stripe payments keep their seats.
 export function paymentHoldExpired(row: Hold, now = Date.now()): boolean {
   const receipt = row.receipts?.at(-1) || row.receipt;
   if (row.cancelledAt || row.paidAt || row.payment === 'paid' || row.admissionStatus === 'approved'
-    || receiptProtectsHold(receipt)
+    || (receipt?.status === 'pending' && !receipt.submittedAfterHold)
     || row.stripe && !['expired', 'test_paid'].includes(row.stripe.status)) return false;
   return row.holdExpired === true || Boolean(row.holdExpiresAt && Date.parse(row.holdExpiresAt) <= now);
 }
