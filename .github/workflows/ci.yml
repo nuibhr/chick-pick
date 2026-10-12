@@ -9,6 +9,7 @@ on:
       - 'fix/**'
       - 'feat/**'
       - 'chore/**'
+      - 'audit/preflight-20261012'
   workflow_dispatch:
 
 permissions:
@@ -25,9 +26,11 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
           cache: npm
@@ -39,3 +42,15 @@ jobs:
         run: npm test
       - name: Secure Cloudflare frontend build
         run: npm run build:cloudflare
+      - name: Compile backend with Wrangler without uploading
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: npx --yes wrangler@4.102.0 deploy --dry-run --config wrangler.audit.jsonc --outdir /tmp/chick-pick-worker-build
+      - name: Run real local workerd smoke tests without service credentials
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          npx --yes wrangler@4.102.0 dev --local --config wrangler.audit.jsonc --ip 127.0.0.1 --port 8787 > /tmp/chick-pick-workerd.log 2>&1 &
+          worker_pid=$!
+          trap 'kill "$worker_pid" 2>/dev/null || true' EXIT
+          node scripts/workerRuntimeSmoke.mjs || { cat /tmp/chick-pick-workerd.log; exit 1; }
