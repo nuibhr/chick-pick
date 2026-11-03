@@ -1,5 +1,11 @@
 # Chick&Pick MVP
 
+## Encrypted backups and restore drills — 3 November 2026
+
+Use `npm run backup:init` once, then `npm run backup:create` to capture a consistent TiDB snapshot plus private receipt images in an authenticated encrypted archive. `npm run backup:drill -- --file <archive.cpbackup>` creates fresh private drill resources and verifies restored table digests and every image, without changing live application bindings or business records. Existing target data is never overwritten and legacy login sessions are discarded. The first live-source backup and isolated restore were verified with 14 documents, 112 audit events and 5 KV images. See the [Thai backup and recovery runbook](BACKUP-AND-RECOVERY.md) for key custody, offline verification, manual restore preflight, limits and the separately controlled production-cutover process. These are manual commands; scheduled/off-account backups are not configured by this change.
+
+The hosted-app and UAT notes below are dated historical records; the current late-payment recovery implementation is already on the original Cloudflare Worker. The Node preview remains a separate backend.
+
 ## Current hosted app — 8 October 2026
 
 The Cloudflare + TiDB app uses LINE owner/staff authentication, real Open Play and coach booking APIs, and private slip review with server-side SlipOK verification. Staff can combine roles such as operator + finance; only the owner changes rates, payment settings and team access. New Stripe Checkout is retired; old Stripe records and signed webhooks remain for reconciliation. SlipOK quota is verified from the live owner UI after fixing the unsupported workerd redirect mode. The SCB optional-currency parser failure is fixed and a real 120-baht receipt is now verified through the live admin UI; funds approval remains pending for the owner. See [SCB fix and 90-test validation](SLIPOK-SCB-FIX-2026-10-08.md). A separate LINE member and valid transfer/approval test is still required. The Node preview remains a separate local backend.

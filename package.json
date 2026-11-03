@@ -9,6 +9,11 @@
   "scripts": {
     "test": "node scripts/runTests.mjs",
     "security:secrets": "node scripts/checkSecrets.mjs",
+    "backup:init": "node scripts/cloudBackup.mjs init",
+    "backup:create": "node scripts/cloudBackup.mjs create",
+    "backup:verify": "node scripts/cloudBackup.mjs verify",
+    "backup:restore": "node scripts/cloudBackup.mjs restore",
+    "backup:drill": "node scripts/cloudBackup.mjs drill",
     "dev": "tsx server.marketplace.ts",
     "build": "vite build && esbuild server.marketplace.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "build:cloudflare": "node scripts/checkPublicAssets.mjs && vite build --outDir dist-client",
