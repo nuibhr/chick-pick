@@ -11,3 +11,7 @@ artifacts/
 *.log
 .env*
 !.env.example
+
+# Generated only during isolated UAT deployment; never commit credentials
+.wrangler-uat.jsonc
+.wrangler-uat.secrets.json
