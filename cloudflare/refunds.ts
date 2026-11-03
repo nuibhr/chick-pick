@@ -20,7 +20,10 @@ export function manageRefund(docs: FinanceDocuments, kind: 'game' | 'coaching', 
   const row = kind === 'game' ? docs.marketplace.bookings.find(b => b.id === id) : docs.coaching.find(e => e.id === id);
   if (!row) return fail(404, 'ไม่พบการจอง');
   const unit = kind === 'game' && 'sessionId' in row ? 'game:' + row.sessionId : 'coaching:' + id;
-  if (docs['revenue-settlements'].some(s => s.key === unit)) fail(409, 'ปิดยอดแล้ว ติดต่อเจ้าของเพื่อกระทบยอดก่อนยกเลิกหรือคืนเงิน');
+  const postSettlement = docs['revenue-settlements'].some(s => s.key === unit);
+  // A late, previously unrecognised transfer is a separate money-in/money-out adjustment.
+  // Never rewrite the already closed sale or previously approved payment.
+  if (postSettlement && (!row.latePayment || row.paidAt)) fail(409, 'ปิดยอดแล้ว ติดต่อเจ้าของเพื่อกระทบยอดก่อนยกเลิกหรือคืนเงิน');
   const now = new Date().toISOString(), all = [...docs.marketplace.bookings, ...docs.coaching];
   if (v.action === 'cancel') {
     if (row.refund) return { repeated: true, refund: row.refund };
@@ -29,7 +32,7 @@ export function manageRefund(docs: FinanceDocuments, kind: 'game' | 'coaching', 
     // Legacy Stripe payments need reconciliation with Stripe, not a second manual refund.
     if (stripeLocksPayment(row.stripe) || row.stripe?.status === 'paid') fail(409, 'รายการ Stripe ต้องตรวจสถานะและคืนเงินผ่านระบบเดิมก่อน');
     const paid = Boolean(row.paidAt || 'payment' in row && row.payment === 'paid');
-    row.refund = { status: paid ? 'pending' : 'review_required', reason: cancellationReason, requestedAt: now, requestedBy: actor.sub,
+    row.refund = { status: paid ? 'pending' : 'review_required', reason: cancellationReason, requestedAt: now, requestedBy: actor.sub, ...(postSettlement ? { postSettlement: true } : {}),
       ...(paid ? { receivedAmount: kind === 'game' ? row.amount : Math.round(row.amount * 100), receivedAt: row.paidAt || now, receivedBy: actor.sub, transferReference: row.receipts?.find(r => r.status === 'approved')?.verifiedTransferReference } : {}) };
     row.cancelledAt ||= now;
     if ('sessionId' in row) { row.admissionStatus = 'pending'; row.cancelledBy = 'organizer'; }

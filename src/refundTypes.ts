@@ -6,6 +6,7 @@ export type BookingRefund = {
   transferReference?: string; receiptId?: string;
   completedAt?: string; completedBy?: string; refundReference?: string;
   resolutionReason?: string;
+  postSettlement?: boolean;
 };
 export type PublicRefund = Pick<BookingRefund, 'status' | 'reason' | 'receivedAmount' | 'completedAt'>;
 export const refundNeedsAction = (refund?: BookingRefund) => refund?.status === 'review_required' || refund?.status === 'pending';

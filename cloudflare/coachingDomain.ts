@@ -9,6 +9,7 @@ import { publicTransferAccount } from '../src/paymentChannels';
 import { catalogManagement, venueOpen } from './catalogManagement';
 import { assertRefundReferenceAvailable } from './refunds';
 import { publicRefund } from '../src/refundTypes';
+import { publicLatePayment } from '../src/latePayment';
 
 const active = (e: Enrollment) => !e.cancelledAt && !lessonHoldExpired(e) && e.lessons.some(l => l.status !== 'cancelled');
 const reserved = (docs: FinanceDocuments, slot: CoachSlot) => docs.coaching.some(e => e.coachId === slot.coachId && active(e) && e.lessons.some(l => l.status !== 'cancelled' && Date.parse(l.start) < Date.parse(slot.start) + slot.hours * 3600000 && Date.parse(l.start) + l.hours * 3600000 > Date.parse(slot.start)));
@@ -25,7 +26,7 @@ export function coachCatalog(docs: FinanceDocuments, bookingEnabled: boolean) {
   return { coaches: coaches.map(({ bookingFee, ...c }) => ({ ...c, bookingReady: bookingFee !== undefined })), slots: slots(docs).filter(s => coaches.some(c => c.id === s.coachId) && Date.parse(s.start) > Date.now()).map(s => { const fee = coaches.find(c => c.id === s.coachId)?.bookingFee; return { ...s, bookingReady: fee !== undefined && Math.round(fee * 100) <= Math.round(s.price * 100), status: reserved(docs, s) ? 'booked' as const : s.status }; }), bookingEnabled, demo: false };
 }
 export function coachAdmin(docs: FinanceDocuments) {
-  return { coaches: profiles(docs).map(c => ({ ...c, management: catalogManagement(docs, 'coach', c.id) })), slots: slots(docs).map(s => ({ ...s, management: catalogManagement(docs, 'slot', s.id), status: reserved(docs, s) ? 'booked' as const : s.status })), enrollments: docs.coaching.map(e => ({...e, cancelledAt: e.cancelledAt || (lessonHoldExpired(e) ? e.holdExpiresAt : undefined)})), demo: false };
+  return { coaches: profiles(docs).map(c => ({ ...c, management: catalogManagement(docs, 'coach', c.id) })), slots: slots(docs).map(s => ({ ...s, management: catalogManagement(docs, 'slot', s.id), status: reserved(docs, s) ? 'booked' as const : s.status })), enrollments: docs.coaching.map(e => ({...e, holdExpired: lessonHoldExpired(e)})), demo: false };
 }
 export function saveCoach(docs: FinanceDocuments, v: Record<string, unknown>, id?: string, canConfigure = true) {
   if (typeof v.hourlyRate !== 'number' || !Number.isFinite(v.hourlyRate) || v.hourlyRate <= 0 || v.hourlyRate > 100000 || Math.abs(v.hourlyRate * 100 - Math.round(v.hourlyRate * 100)) > 0.00001 || typeof v.active !== 'boolean') fail(400, 'ระบุราคาเป็นบาทไม่เกิน 2 ทศนิยมและสถานะโค้ช');
@@ -72,6 +73,7 @@ export function bookLesson(docs: FinanceDocuments, actor: Actor, slotId: unknown
   if (!venueOpen(docs, coach.venue)) fail(409, 'สนามของโค้ชหยุดรับจองแล้ว');
   const existing = docs.coaching.find(e => e.playerId === 'line:' + actor.sub && active(e) && e.lessons.some(l => l.slotId === slot.id));
   if (existing) return { id: existing.id, repeated: true };
+  if (docs.coaching.some(e => e.playerId === 'line:' + actor.sub && e.latePayment?.status === 'review_required' && e.lessons.some(l => l.slotId === slot.id))) fail(409, 'มีสลิปย้อนหลังของเวลานี้รอตรวจ กรุณาอย่าจองใหม่หรือโอนซ้ำ');
   if (coach.bookingFee === undefined || Math.round(coach.bookingFee * 100) > Math.round(slot.price * 100)) fail(409, 'เจ้าของต้องตั้งค่าหัวคิวที่ไม่เกินค่าเรียนก่อนเปิดจอง');
   if (slot.status !== 'open' || Date.parse(slot.start) < Date.now() + 1800000 || reserved(docs, slot)) fail(409, 'ช่วงเวลานี้ปิดรับหรือมีผู้จองแล้ว');
   if (stripeReady && (Date.parse(slot.start) < Date.now() + 35 * 60000 || slot.price < 10 || slot.price > 100000)) fail(409, 'PromptPay ต้องจองก่อนเริ่มอย่างน้อย 35 นาที และยอด 10–100,000 บาท');
@@ -87,7 +89,7 @@ export function ownLesson(docs: FinanceDocuments, actor: Actor, id: string) {
 }
 export function lessonReceiptEligibility(docs: FinanceDocuments, actor: Actor, id: string) {
   const e = ownLesson(docs, actor, id);
-  if (closed(docs, id) || !active(e) || e.payment === 'paid' || stripeLocksPayment(e.stripe) || e.receipts?.at(-1)?.status === 'pending') fail(409, 'รายการนี้ปิดรับสลิป มี QR Stripe หรือมีสลิปรอตรวจ');
+  if (e.cancelledAt || e.payment === 'paid' || stripeLocksPayment(e.stripe) || e.receipts?.at(-1)?.status === 'pending') fail(409, 'รายการนี้ปิดรับสลิป มี QR Stripe หรือมีสลิปรอตรวจ');
   if (!e.transferAccount) fail(409, 'ไม่มีบัญชีรับโอน ติดต่อผู้จัด');
   if ((e.receipts || []).filter(r => Date.parse(r.submittedAt) > Date.now() - 86400000).length >= 10) fail(429, 'ส่งสลิปหลายครั้งเกินไป');
   return e;
@@ -95,18 +97,20 @@ export function lessonReceiptEligibility(docs: FinanceDocuments, actor: Actor, i
 export function submitLessonReceipt(docs: FinanceDocuments, actor: Actor, id: string, receipt: ReceiptSubmission) {
   const e = lessonReceiptEligibility(docs, actor, id);
   if ([...docs.coaching.filter(other => other.id !== id), ...docs.marketplace.bookings].some(other => other.receipts?.some(r => r.sha256 === receipt.sha256 && r.status !== 'rejected'))) fail(409, 'ภาพสลิปนี้ใช้กับรายการอื่นแล้ว');
+  if (lessonHoldExpired(e) || closed(docs, id)) e.latePayment = { status: 'review_required', receiptId: receipt.id, submittedAt: receipt.submittedAt };
   e.receipts = [...(e.receipts || []), receipt];
 }
 export function reviewLessonReceipt(docs: FinanceDocuments, id: string, receiptId: string, v: Record<string, unknown>) {
   const e = docs.coaching.find(e => e.id === id), r = e?.receipts?.at(-1);
   if (!e || !r || r.id !== receiptId) fail(404, 'ไม่พบสลิป');
-  if (closed(docs, id) || !active(e) || e.payment === 'paid' || r.status !== 'pending') fail(409, 'สลิปนี้ไม่อยู่ระหว่างรอตรวจ');
+  if (e.cancelledAt || e.payment === 'paid' || r.status !== 'pending' || !e.latePayment && (closed(docs, id) || !active(e))) fail(409, 'สลิปนี้ไม่อยู่ระหว่างรอตรวจ');
   if (v.action === 'approve') {
+    if (e.latePayment?.status === 'review_required') fail(409, 'สลิปย้อนหลังต้องตรวจเวลาว่างและรับกลับ หรือส่งเข้าคิวคืนเงิน');
     if (v.fundsChecked !== true) fail(400, 'ต้องตรวจยอดเงินเข้าบัญชีจริงก่อนอนุมัติ');
     recordVerifiedTransfer(r, Math.round(e.amount * 100), v, [...docs.marketplace.bookings, ...docs.coaching].flatMap(item => item.receipts || []));
     assertRefundReferenceAvailable(docs, r.verifiedTransferReference);
     r.status = 'approved'; e.paidAt = new Date().toISOString(); e.payment = 'paid'; e.paymentMethod = 'transfer';
-  } else if (v.action === 'reject') { r.rejectReason = text(v.reason, 200); if (r.rejectReason.length < 3) fail(400, 'ระบุเหตุผลอย่างน้อย 3 ตัวอักษร'); r.status = 'rejected'; e.holdExpiresAt = new Date(Date.now() + 1800000).toISOString(); }
+  } else if (v.action === 'reject') { r.rejectReason = text(v.reason, 200); if (r.rejectReason.length < 3) fail(400, 'ระบุเหตุผลอย่างน้อย 3 ตัวอักษร'); r.status = 'rejected'; if (!e.latePayment) e.holdExpiresAt = new Date(Date.now() + 1800000).toISOString(); }
   else fail(400, 'เลือกอนุมัติหรือปฏิเสธ');
   r.reviewedAt = new Date().toISOString(); return { status: r.status };
 }
@@ -128,5 +132,5 @@ export function completeLesson(docs: FinanceDocuments, id: string) {
 
 export function lessonView(e: Enrollment) {
   const receipt = e.receipts?.at(-1);
-  return { kind: 'coaching' as const, id: e.id, sessionId: e.lessons[0]?.slotId || '', title: e.title, startsAt: e.lessons[0]?.start, venue: e.venue || '', hours: e.totalHours, amount: Math.round(e.amount * 100), createdAt: e.createdAt, holdExpiresAt: e.holdExpiresAt || null, paidAt: e.paidAt || null, admissionStatus: e.payment === 'paid' ? 'approved' : 'pending', cancelledAt: e.cancelledAt || (lessonHoldExpired(e) ? e.holdExpiresAt : null), refund: publicRefund(e.refund), transferAccount: publicTransferAccount(e.transferAccount), completed: e.lessons.every(l => l.status === 'completed'), stripe: stripePublicView(e.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null };
+  return { kind: 'coaching' as const, id: e.id, sessionId: e.lessons[0]?.slotId || '', title: e.title, startsAt: e.lessons[0]?.start, venue: e.venue || '', hours: e.totalHours, amount: Math.round(e.amount * 100), createdAt: e.createdAt, holdExpiresAt: e.holdExpiresAt || null, paidAt: e.paidAt || null, admissionStatus: e.payment === 'paid' ? 'approved' : 'pending', cancelledAt: e.cancelledAt || null, holdExpired: lessonHoldExpired(e), latePayment: publicLatePayment(e.latePayment), refund: publicRefund(e.refund), transferAccount: publicTransferAccount(e.transferAccount), completed: e.lessons.every(l => l.status === 'completed'), stripe: stripePublicView(e.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null };
 }

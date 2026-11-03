@@ -12,7 +12,7 @@ function pendingReceipt(docs: FinanceDocuments, kind: 'game' | 'coaching', id: s
   const receipt = row?.receipts?.at(-1);
   const unit = kind === 'game' ? 'game:' + (row && 'sessionId' in row ? row.sessionId : '') : 'coaching:' + id;
   if (!row || !receipt || receipt.id !== receiptId) return fail(404, 'ไม่พบสลิปที่รอตรวจ');
-  if (row.cancelledAt || row.paidAt || receipt.status !== 'pending' || docs['revenue-settlements'].some(s => s.key === unit)) fail(409, 'รายการนี้ปิดรับผลตรวจแล้ว');
+  if (row.cancelledAt || row.paidAt || receipt.status !== 'pending' || !row.latePayment && docs['revenue-settlements'].some(s => s.key === unit)) fail(409, 'รายการนี้ปิดรับผลตรวจแล้ว');
   if (!row.transferAccount) fail(409, 'การจองนี้ไม่มีบัญชีรับโอน');
   return { row, receipt, amount: kind === 'game' ? row.amount : Math.round(row.amount * 100), account: row.transferAccount! };
 }

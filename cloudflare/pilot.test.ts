@@ -195,7 +195,7 @@ test('five-minute holds do not extend on retry; expired last seat reopens for ex
   assert.equal(finance.rows.find((r: any) => r.id === 'booking_' + row.id).status, 'void'); assert.equal(finance.summary.income, 0);
 });
 
-test('expired booking cannot upload or mint/reuse QR, while the same player can reserve a new seat', async t => {
+test('expired booking accepts late evidence but cannot mint/reuse QR or create another reservation while review is pending', async t => {
   const f = fixture(t), owner = await f.signIn(); f.docs.set('worker-pilot', { bookingEnabled: true });
   await f.request('/api/marketplace/setup/transfer-channels', { channels: [{ id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'Fixture', accountNumber: '0812345678' }] }, owner);
   const old = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'))).json()).booking.id;
@@ -206,9 +206,9 @@ test('expired booking cannot upload or mint/reuse QR, while the same player can 
   const url = new URL(qr.url); assert.equal((await f.request(url.pathname + url.search)).status, 410);
   assert.equal((await f.request(url.pathname.replace('/view', '/image') + url.search)).status, 410);
   const upload = await pilotRequest(new Request(`https://example.com/api/player/bookings/${old}/receipt`, { method: 'POST', headers: { ...f.player('a'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,1]) }), f.env, f.verify);
-  assert.equal(upload!.status, 410); assert.equal(f.images.size, 0); assert.match((await upload!.json()).message, /อย่าโอนซ้ำ/);
+  assert.equal(upload!.status, 201); assert.equal(f.images.size, 1); assert.equal(f.data.bookings[0].latePayment?.status, 'review_required'); assert.equal(activeBooking(f.data.bookings[0]), false);
   const fresh = await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('a'));
-  assert.equal(fresh.status, 201); assert.notEqual((await fresh.json()).booking.id, old); assert.equal(f.data.bookings.filter(activeBooking).length, 1);
+  assert.equal(fresh.status, 409); assert.equal(f.data.bookings.length, 1); assert.equal(f.data.bookings.filter(activeBooking).length, 0);
 });
 
 test('receipt committed before deadline retains the last seat throughout delayed admin review', async t => {
@@ -234,8 +234,8 @@ test('expiry during image storage is rechecked under the same booking lock; late
   await storageEntered;
   f.data.bookings.at(-1)!.holdExpiresAt = new Date(Date.now() - 1).toISOString();
   assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('e'))).status, 201);
-  release(); assert.equal((await uploading)!.status, 410);
-  assert.equal(f.images.size, 0); assert.equal(f.data.bookings.find(b => b.id === row.id)!.receipts, undefined); assert.equal(f.data.bookings.filter(activeBooking).length, 4);
+  release(); assert.equal((await uploading)!.status, 201);
+  assert.equal(f.images.size, 1); assert.equal(f.data.bookings.find(b => b.id === row.id)!.latePayment?.status, 'review_required'); assert.equal(f.data.bookings.filter(activeBooking).length, 4);
 });
 
 test('admin repairs only currency parser failures from the same hashed image and still rejects reused transfers', async t => {
@@ -543,7 +543,7 @@ test('real coach calendar: no anonymous admin access, server pricing, overlap, l
   const held = (f.docs.get('coaching') as any[]).find(e => e.playerId === 'line:player-c');
   held.holdExpiresAt = new Date(Date.now()-1000).toISOString();
   assert.equal((await f.request('/api/player/lessons', {slotId:slot.id}, f.player('d'))).status,201);
-  assert.ok((await(await f.request('/api/player/lessons',undefined,f.player('c'))).json()).lessons[0].cancelledAt);
+  assert.equal((await(await f.request('/api/player/lessons',undefined,f.player('c'))).json()).lessons[0].holdExpired, true);
 });
 
 test('coaching receipts are private, cannot reuse game slips, require manual approval and retain booking fee', async t => {
@@ -656,6 +656,49 @@ test('refund API cancels pending slips atomically, keeps private evidence, and c
   assert.equal(report.rows.filter((r: any) => r.category === 'refund').length, 1);
   assert.equal(report.summary.income, 19000); assert.equal(report.summary.expense, 19000); assert.equal(report.summary.net, 0);
   assert.equal(f.data.bookings[0].paidAt, undefined); assert.equal(f.images.size, 1);
+});
+
+test('late acceptance races a new buyer for the last seat under the shared reservation lock', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  for (const player of ['a', 'b', 'c', 'late']) await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(player));
+  const id = f.data.bookings.at(-1)!.id; f.data.bookings.at(-1)!.holdExpiresAt = new Date(Date.now() - 1).toISOString();
+  const upload = await pilotRequest(new Request(`https://example.com/api/player/bookings/${id}/receipt`, { method: 'POST', headers: { ...f.player('late'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,1]) }), f.env, f.verify);
+  assert.equal(upload!.status, 201); const receiptId = (await upload!.json()).receipt.id;
+  const row = f.data.bookings.find(b => b.id === id)!;
+  row.receipts![0].verification = { provider: 'slipok', status: 'verified', reference: 'LATE123456', amountSatang: 19000, checkedAt: new Date().toISOString(), message: 'Verified' };
+  const path = `/api/marketplace/bookings/${id}/payment-recovery`, command = { action: 'accept', receiptId, fundsChecked: true };
+  assert.equal((await f.request(path, command, f.player('late'))).status, 401);
+  assert.equal((await f.request(path, command, { ...owner, Origin: 'https://evil.example' })).status, 403);
+  assert.equal((await f.request(`/api/marketplace/bookings/${id}/receipts/${receiptId}/review`, { action: 'approve', fundsChecked: true }, owner)).status, 409);
+  assert.equal((await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('late'))).status, 409);
+  const race = await Promise.all([f.request(path, command, owner), f.request('/api/player/bookings', { sessionId: 'game' }, f.player('new'))]);
+  assert.equal(race.filter(r => r.status === 409).length, 1);
+  assert.equal(f.data.bookings.filter(activeBooking).length, 4);
+  if (race[0].status === 200) {
+    assert.equal((await f.request(path, command, owner)).status, 200);
+    assert.equal(f.data.bookings.find(b => b.id === id)!.admissionStatus, 'pending');
+  } else assert.equal(f.data.bookings.find(b => b.id === id)!.paidAt, undefined);
+});
+
+test('late payment refund is finance-only, duplicate-safe and never asserts a real bank refund', async t => {
+  const f = fixture(t), owner = await f.signIn(); f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  const issued = await (await f.request('/api/finance/admin-team', { action: 'invite', role: 'operator' }, owner)).json();
+  const signed = await f.request('/api/finance/auth', { idToken: 'test-line-token-operator', pairingToken: issued.code });
+  const operator = { Cookie: signed.headers.get('set-cookie')!.split(';')[0] };
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('late'))).json()).booking.id;
+  f.data.bookings[0].holdExpiresAt = new Date(Date.now() - 1).toISOString();
+  const upload = await pilotRequest(new Request(`https://example.com/api/player/bookings/${id}/receipt`, { method: 'POST', headers: { ...f.player('late'), 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,2]) }), f.env, f.verify);
+  const receiptId = (await upload!.json()).receipt.id;
+  f.data.bookings[0].receipts![0].verification = { provider: 'slipok', status: 'verified', reference: 'REFUND123456', amountSatang: 19000, checkedAt: new Date().toISOString(), message: 'Verified' };
+  const path = `/api/marketplace/bookings/${id}/payment-recovery`, command = { action: 'refund', receiptId, fundsChecked: true };
+  assert.equal((await f.request(path, command, operator)).status, 403);
+  assert.equal((await f.request(path, { ...command, fundsChecked: false }, owner)).status, 400);
+  const replies = await Promise.all([f.request(path, command, owner), f.request(path, command, owner)]);
+  assert.deepEqual(replies.map(r => r.status), [200, 200]);
+  assert.equal(f.data.bookings[0].refund?.status, 'pending'); assert.equal(f.data.bookings[0].refund?.completedAt, undefined); assert.equal(f.data.bookings[0].paidAt, undefined);
+  const report = await (await f.request('/api/finance/report', undefined, owner)).json();
+  assert.equal(report.summary.income, 19000); assert.equal(report.summary.pendingExpense, 19000); assert.equal(report.summary.expense, 0);
 });
 
 function fixture(t: TestContext) {

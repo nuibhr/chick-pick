@@ -20,6 +20,7 @@ import { stripeLocksPayment } from '../src/paymentTypes';
 import { expiredHoldMessage, paymentHoldExpired } from '../src/bookingHold';
 import { catalogManagement, deleteCatalogEntry, pauseSession, saveSession, type CatalogKind } from './catalogManagement';
 import { manageRefund, assertRefundReferenceAvailable } from './refunds';
+import { resolveLatePayment } from './latePayments';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
 export type PilotEnv = StripeEnv & SlipOkEnv & { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
@@ -192,7 +193,7 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       const receiptId = crypto.randomUUID(), hash = await digest(image);
       const receipt: ReceiptSubmission = { id: receiptId, fileName: `${receiptId}.${type === 'image/jpeg' ? 'jpg' : type === 'image/png' ? 'png' : 'webp'}`, mimeType: type as ReceiptSubmission['mimeType'], size: image.length, sha256: hash, submittedAt: new Date().toISOString(), status: 'pending', ocr: unavailableOcr(), ...(slipokConfigured(env) ? { verification: { provider: 'slipok' as const, status: 'unavailable' as const, checkedAt: new Date().toISOString(), message: 'รอเริ่มตรวจ SlipOK' } } : {}) };
       await env.RECEIPTS.put(`receipt:${receiptId}`, new Uint8Array(image).buffer);
-      try { await db.updateFinance(docs => { const b = receiptEligibility(docs.marketplace, actor, id); if (docs['revenue-settlements'].some(s => s.key === `game:${b.sessionId}`)) fail(409, 'ก๊วนปิดยอดแล้ว'); if (docs.coaching.some(e => e.receipts?.some(r => r.sha256 === receipt.sha256 && r.status !== 'rejected'))) fail(409, 'ภาพสลิปนี้ใช้กับการเรียนแล้ว'); submitReceipt(docs.marketplace, actor, id, receipt); }, audit(actor, 'receipt.submitted', receiptId)); }
+      try { await db.updateFinance(docs => { const b = receiptEligibility(docs.marketplace, actor, id); if (docs.coaching.some(e => e.receipts?.some(r => r.sha256 === receipt.sha256 && r.status !== 'rejected'))) fail(409, 'ภาพสลิปนี้ใช้กับการเรียนแล้ว'); submitReceipt(docs.marketplace, actor, id, receipt); if (docs['revenue-settlements'].some(s => s.key === `game:${b.sessionId}`)) b.latePayment = { status: 'review_required', receiptId, submittedAt: receipt.submittedAt }; }, audit(actor, 'receipt.submitted', receiptId)); }
       catch (e) {
         // Business rejection happened before commit. A network error may have happened after commit;
         // retain the image in that case so a paid booking never loses its evidence.
@@ -204,6 +205,12 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     }
     const owner = await authenticateAdmin(request, env.ADMIN_SESSION_SECRET, db);
     authorize(owner.roles, path, request.method);
+    const recoveryRoute = path.match(/^\/api\/(marketplace\/bookings|coaching\/enrollments)\/([^/]+)\/payment-recovery$/);
+    if (recoveryRoute && request.method === 'POST') {
+      const v = await body(request), kind = recoveryRoute[1] === 'marketplace/bookings' ? 'game' : 'coaching';
+      if (v.action === 'refund' && !permissions(owner.roles).financeWrite) fail(403, 'เจ้าของหรือฝ่ายการเงินเป็นผู้ยืนยันเงินเพื่อคืนเงิน');
+      return json(await db.updateFinance(d => resolveLatePayment(d, kind, recoveryRoute[2], v, owner), { ...audit(owner, `payment-recovery.${String(v.action)}`, recoveryRoute[2], true), entityType: kind === 'game' ? 'booking' : 'enrollment' }));
+    }
     const refundRoute = path.match(/^\/api\/(marketplace\/bookings|coaching\/enrollments)\/([^/]+)\/refund$/);
     if (refundRoute && request.method === 'POST') {
       const v = await body(request), kind = refundRoute[1] === 'marketplace/bookings' ? 'game' : 'coaching';
