@@ -54,3 +54,6 @@ jobs:
 
       - name: Check vulnerable dependencies
         run: npm audit --audit-level=high
+
+      - name: Check the alternate pnpm lockfile
+        run: npx --yes pnpm@10.18.0 audit --audit-level=high

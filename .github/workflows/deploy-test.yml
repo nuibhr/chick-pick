@@ -46,6 +46,7 @@ jobs:
         run: |
           npm run security:secrets
           npm audit --audit-level=high
+          npx --yes pnpm@10.18.0 audit --audit-level=high
 
       - name: Run all regression tests before any deployment
         run: npm test
