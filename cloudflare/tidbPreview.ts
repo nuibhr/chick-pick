@@ -12,6 +12,7 @@ import { publicTransferAccount } from '../src/paymentChannels';
 import { privateAssetPath, secureResponse } from './securityHeaders';
 import { publicRefund } from '../src/refundTypes';
 import { publicLatePayment } from '../src/latePayment';
+import { notificationReadKey } from './playerNotifications';
 
 type Env = StripeEnv & SlipOkEnv & {
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -168,14 +169,15 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
             return {
               id: booking.id, sessionId: booking.sessionId, amount: booking.amount, title: booking.title,
               transferAccount: publicTransferAccount(booking.transferAccount), createdAt: booking.createdAt,
-              paidAt: booking.paidAt || null, admissionStatus: booking.admissionStatus || 'pending',
+              paidAt: booking.paidAt || null, admissionStatus: booking.admissionStatus || 'pending', admissionUpdatedAt: booking.admissionUpdatedAt || null, replacementBookingId: booking.replacementBookingId || null,
               cancelledAt: booking.cancelledAt || null, refund: publicRefund(booking.refund), latePayment: publicLatePayment(booking.latePayment),
               holdExpiresAt: booking.holdExpiresAt || null, holdExpired: bookingHoldExpired(booking),
-              stripe: stripePublicView(booking.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null,
+              stripe: stripePublicView(booking.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, submittedAt: receipt.submittedAt, reviewedAt: receipt.reviewedAt || null, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null,
             };
           });
           const coaching = (await new TidbDocuments(env.TIDB_DATABASE_URL).readDocument<import('../src/coachingTypes').Enrollment[]>('coaching', [])).filter(e => e.playerId === `line:${identity.sub}`).map(lessonView);
-          return json({ bookings: [...bookings.map(b => ({ ...b, kind: 'game' })), ...coaching], serverNow: Date.now() });
+          const read = await new TidbDocuments(env.TIDB_DATABASE_URL).readDocument<{ readAt?: string }>(await notificationReadKey(identity.sub), {});
+          return json({ bookings: [...bookings.map(b => ({ ...b, kind: 'game' })), ...coaching], serverNow: Date.now(), notificationReadAt: read.readAt || null });
         }
         const venues = await new TidbDocuments(env.TIDB_DATABASE_URL).readDocument<import('../src/venueTypes').Venue[]>('court-venues', []);
         return json({ sessions: data.sessions.map(session => publicSession(session, data.bookings, data.profiles, venues)) });

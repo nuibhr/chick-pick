@@ -1,11 +1,7 @@
-import StripeBookingPayment from './StripeBookingPayment';
-import SlipVerificationStatus from './SlipVerificationStatus';
-import PlayerTransferInstructions from './PlayerTransferInstructions';
-import LateReceiptUpload from './LateReceiptUpload';
-import { paymentTicketLabel } from './paymentPresentation';
+import { currentBookingVisible } from './playerNotificationModel';
+import PlayerBookingCard from './PlayerBookingCard';
+import PlayerNotifications from './PlayerNotifications';
 import { paymentHoldExpired } from './bookingHold';
-import BookingHoldNotice from './BookingHoldNotice';
-import type { StripePayment } from './paymentTypes';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight, ArrowUpRight, CalendarCheck, CalendarDays, Check, ChevronRight,
@@ -23,8 +19,8 @@ import { initializeLine, reauthenticateLine } from './lineSession';
 import type { Venue } from './venueTypes';
 import './player-app.css';
 
-type BookingView = { latePayment?: import('./latePayment').PublicLatePayment | null; refund?: import('./refundTypes').PublicRefund | null; stripe?: Pick<StripePayment, 'status' | 'mode' | 'expiresAt' | 'issue'> | null; holdExpiresAt?: string | null; holdExpired?: boolean; kind?: 'game' | 'coaching'; startsAt?: string; venue?: string; completed?: boolean; transferAccount: TransferAccount | null; id: string; sessionId: string; amount: number; title: string; createdAt: string; paidAt: string | null; admissionStatus: 'pending' | 'approved'; cancelledAt: string | null; receipt: { id: string; status: 'pending' | 'approved' | 'rejected'; ocr: SlipOcr; verification?: import('../cloudflare/slipok').SlipVerification; rejectReason: string | null } | null };
-type OwnBookings = { bookings: BookingView[]; serverNow?: number };
+type BookingView = import('./playerBookingTypes').PlayerBooking;
+type OwnBookings = { bookings: BookingView[]; serverNow?: number; notificationReadAt?: string | null };
 type PlayerConfig = { slipokConfigured?: boolean; paymentProvider?: 'manual' | 'stripe'; stripeConfigured?: boolean; stripeMode?: 'test' | 'live' | null; liffId: string | null; connected: boolean; bookingEnabled: boolean; profileEditingEnabled?: boolean; pilot?: boolean };
 const baht = (n: number) => new Intl.NumberFormat('th-TH', { maximumFractionDigits: 2 }).format(n);
 
@@ -61,10 +57,14 @@ export default function PlayerApp() {
   const [registeredVenues, setRegisteredVenues] = useState<Venue[]>([]);
   const [needsAuth, setNeedsAuth] = useState(false);
   const [bookings, setBookings] = useState<BookingView[]>([]);
+  const [notificationReadAt, setNotificationReadAt] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [focusedBooking, setFocusedBooking] = useState<string | null>(null);
   const [serverOffset, setServerOffset] = useState(0);
   const [clockNow, setClockNow] = useState(Date.now());
   const setOwnBookings = (own: OwnBookings) => {
     setBookings(own.bookings);
+    setNotificationReadAt(previous => !own.notificationReadAt || Date.parse(previous || '') > Date.parse(own.notificationReadAt) ? previous : own.notificationReadAt);
     if (typeof own.serverNow === 'number') { const offset = own.serverNow - Date.now(); setServerOffset(offset); setClockNow(Date.now() + offset); }
   };
   const [token, setToken] = useState('');
@@ -97,7 +97,7 @@ export default function PlayerApp() {
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const handleUnauthorized = (cause: unknown) => { if ((cause as { status?: number })?.status === 401) { setNeedsAuth(true); setToken(''); setProfile(null); setPerson(''); setBookings([]); } };
+  const handleUnauthorized = (cause: unknown) => { if ((cause as { status?: number })?.status === 401) { setNeedsAuth(true); setToken(''); setProfile(null); setPerson(''); setBookings([]); setNotificationReadAt(null); } };
 
   useEffect(() => {
     let active = true;
@@ -244,6 +244,15 @@ export default function PlayerApp() {
     finally { setBusy(false); }
   };
 
+  const renewReservation = async (booking: BookingView) => {
+    if (!token || busy) return;
+    setBusy(true); setError('');
+    try {
+      const renewed = await api<{ id: string }>((booking.kind === 'coaching' ? '/lessons/' : '/bookings/') + encodeURIComponent(booking.id) + '/renew', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: '{}' });
+      const [own, catalog] = await Promise.all([api<OwnBookings>('/bookings', { headers: { Authorization: 'Bearer ' + token } }), api<{sessions: PublicSession[]}>('/sessions')]);
+      setOwnBookings(own); setSessions(catalog.sessions); setFocusedBooking(renewed.id); setShowHistory(false); setNotice('จองต่อแล้ว เปิด QR ของรายการใหม่เพื่อโอนและส่งสลิปก่อนหมดเวลา');
+    } catch (cause) { handleUnauthorized(cause); setError((cause as Error).message); } finally { setBusy(false); }
+  };
   const uploadReceipt = async (booking: BookingView, file?: File) => {
     if (!file || !token || busy) return;
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) { setError('เลือกภาพ JPG, PNG หรือ WebP ขนาดไม่เกิน 5 MB'); return; }
@@ -256,6 +265,11 @@ export default function PlayerApp() {
     finally { setBusy(false); }
   };
 
+  useEffect(() => {
+    if (tab !== 'tickets' || !focusedBooking) return;
+    const frame = requestAnimationFrame(() => { const item = document.getElementById('booking-' + focusedBooking); if (item) { item.scrollIntoView({ behavior: 'smooth', block: 'center' }); item.focus({ preventScroll: true }); setFocusedBooking(null); } });
+    return () => cancelAnimationFrame(frame);
+  }, [tab, focusedBooking, bookings, showHistory]);
   const available = useMemo(() => sessions
     .filter(session => session.status !== 'completed')
     .filter(session => !filter || sessionPlayStyle(session) === filter)
@@ -278,7 +292,7 @@ export default function PlayerApp() {
         <span className="pa-brand-icon"><img src="/brand/chick-pick-mark.png" alt="" /></span>
         <span className="pa-brand-name">Chick<span>&</span>Pick<small>PLAY GOOD. FEEL GOOD.</small></span>
       </button>
-      <div className="pa-header-actions"><button className="pa-header-action" type="button" onClick={() => navigate('profile')} aria-label="ตั้งค่าธีมหน้าจอ">{theme === 'dark' ? <Moon size={19} /> : <Sun size={19} />}</button><button className="pa-header-action" type="button" onClick={() => navigate('tickets')} aria-label="ดูการจองของฉัน">
+      <div className="pa-header-actions"><PlayerNotifications bookings={bookings} now={clockNow} readAt={notificationReadAt} signedIn={Boolean(token)} login={login} markRead={async through => { const result = await api<{readAt: string}>('/notifications/read', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ readThrough: through }) }); setNotificationReadAt(result.readAt); }} openBooking={id => { setFocusedBooking(id); setShowHistory(true); navigate('tickets'); }} /><button className="pa-header-action" type="button" onClick={() => navigate('profile')} aria-label="ตั้งค่าธีมหน้าจอ">{theme === 'dark' ? <Moon size={19} /> : <Sun size={19} />}</button><button className="pa-header-action" type="button" onClick={() => navigate('tickets')} aria-label="ดูการจองของฉัน">
         <Ticket size={20} />
         {bookings.length > 0 && <i aria-hidden="true" />}
       </button></div>
@@ -317,10 +331,7 @@ export default function PlayerApp() {
 
       {tab === 'tickets' && <>
         <div className="pa-page-intro"><span>MY COURT TIME</span><h1>การจองของฉัน<span>.</span></h1><p>{token ? 'ก๊วนที่ผูกกับบัญชี LINE ของคุณ' : 'เชื่อม LINE เพื่อดูการจองของตัวเอง'}</p></div>
-        {!token ? <div className="pa-state-card"><span><LockKeyhole size={27} /></span><h2>การจองอยู่ในบัญชีของคุณ</h2><p>เมื่อเชื่อม LINE แล้ว จะแสดงเฉพาะก๊วนที่คุณจองไว้</p>{config.connected ? <button type="button" onClick={login}>เชื่อม LINE <ArrowRight size={17} /></button> : <small>LINE Mini App ยังไม่ได้ตั้งค่า</small>}</div> : bookings.length ? <div className="pa-ticket-list">{bookings.map(booking => {
-          const session = sessions.find(item => item.id === booking.sessionId);
-          return <article className="pa-ticket" key={booking.id}><div className="pa-ticket-head"><span><Ticket size={16} /> {booking.kind === 'coaching' ? 'COACH PASS' : 'COURT PASS'}</span><span className={booking.admissionStatus === 'approved' ? 'paid' : ''}>{paymentTicketLabel(booking, clockNow)}</span></div><div className="pa-ticket-main"><small>{booking.kind === 'coaching' && booking.startsAt ? new Date(booking.startsAt).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' }) : (session?.date || 'วันที่ก๊วน') + ' · ' + (session?.time || 'ดูรายละเอียดกับผู้จัด')}</small><h2>{booking.title}</h2><p><MapPin size={14} />{booking.venue || session?.venue || 'รายละเอียดสนาม'}</p></div><div className="pa-ticket-foot"><span>เลขจอง <b>{booking.id.slice(0, 8).toUpperCase()}</b></span><strong>฿{baht(booking.amount / 100)}</strong></div><BookingHoldNotice booking={booking} now={clockNow} /><LateReceiptUpload booking={booking} now={clockNow} busy={busy} upload={file => { void uploadReceipt(booking, file); }} />{booking.cancelledAt && booking.refund && <p className="pa-slip-note">{booking.refund.reason}<br />{booking.refund.status === 'review_required' || booking.refund.status === 'pending' ? 'ผู้จัดกำลังตรวจเงินหรือเตรียมโอนคืน กรุณาอย่าโอนซ้ำ' : booking.refund.status === 'completed' ? 'ผู้จัดบันทึกโอนคืนแล้ว กรุณาตรวจยอดบัญชีของคุณ' : 'ผู้จัดตรวจแล้วไม่มียอดเงินต้องคืน หากเคยโอนกรุณาติดต่อผู้จัด'}</p>}{booking.cancelledAt && booking.stripe?.issue && <p className="pa-slip-note" role="alert">{booking.stripe.issue}</p>}{!booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && !booking.paidAt && (booking.stripe && booking.stripe.status !== 'expired') && <StripeBookingPayment booking={booking} token={token} mode={booking.stripe?.mode || config.stripeMode} ready={Boolean(config.stripeConfigured)} refresh={async () => { const own = await api<OwnBookings>('/bookings', { headers: { Authorization: 'Bearer ' + token } }); setOwnBookings(own); }} />}{!booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && !booking.paidAt && config.paymentProvider !== 'stripe' && (!booking.stripe || booking.stripe.status === 'expired') && <PlayerTransferInstructions account={booking.transferAccount} amount={booking.amount} slipok={Boolean(config.slipokConfigured)} pending={booking.receipt?.status === 'pending'} holdExpiresAt={booking.holdExpiresAt} openQr={async channel => { const result = await api<{ url: string }>("/payments/qr", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ kind: booking.kind || "game", id: booking.id, channel }) }); return result.url; }} />}{!booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && <SlipVerificationStatus verification={booking.receipt?.verification} receiptStatus={booking.receipt?.status} />}{booking.receipt?.rejectReason && <p className="pa-slip-note" role="alert">แอดมินแจ้ง: {booking.receipt.rejectReason}</p>}{booking.receipt?.ocr.status === 'complete' && <details className="pa-slip-ocr"><summary>ข้อมูลที่ OCR อ่านได้ · กรุณาตรวจความถูกต้อง</summary><pre>{JSON.stringify(booking.receipt.ocr, null, 2)}</pre></details>}{booking.receipt?.ocr.status === 'failed' && <p className="pa-slip-note">OCR อ่านภาพไม่สำเร็จ แอดมินยังตรวจภาพสลิปได้</p>}{!booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && !booking.paidAt && config.paymentProvider !== 'stripe' && (!booking.stripe || booking.stripe.status === 'expired') && booking.receipt?.status !== 'pending' && <label className="pa-slip-upload">{busy ? 'กำลังส่งสลิปและตรวจรายการ…' : booking.receipt?.status === 'rejected' ? 'ถ่ายรูปหรือเลือกสลิปใหม่' : 'ถ่ายรูปหรือแนบสลิปโอนเงิน'}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={event => { void uploadReceipt(booking, event.target.files?.[0]); event.target.value = ''; }} /></label>}{!booking.cancelledAt && !paymentHoldExpired(booking, clockNow) && !booking.paidAt && booking.receipt?.status !== 'pending' && (!booking.stripe || ['expired', 'test_paid'].includes(booking.stripe.status)) && booking.admissionStatus !== 'approved' && Date.parse(booking.startsAt || session?.startsAt || '') > Date.now() && <button type="button" className="pa-cancel-booking" disabled={busy} onClick={() => cancelBooking(booking)}>ยกเลิกการจอง</button>}</article>;
-        })}</div> : <div className="pa-empty"><Ticket size={28} /><b>ยังไม่มีการจอง</b><p>เริ่มจากเลือกก๊วนที่อยากไปเล่น</p><button type="button" onClick={() => navigate('discover')}>ไปหาก๊วน <ArrowRight size={15} /></button></div>}
+        {!token ? <div className="pa-state-card"><span><LockKeyhole size={27} /></span><h2>การจองอยู่ในบัญชีของคุณ</h2><p>เมื่อเชื่อม LINE แล้ว จะแสดงเฉพาะก๊วนที่คุณจองไว้</p>{config.connected ? <button type="button" onClick={login}>เชื่อม LINE <ArrowRight size={17} /></button> : <small>LINE Mini App ยังไม่ได้ตั้งค่า</small>}</div> : bookings.length ? <><div className="pa-booking-filter"><button type="button" aria-pressed={!showHistory} onClick={() => setShowHistory(false)}>รายการปัจจุบัน</button><button type="button" aria-pressed={showHistory} onClick={() => setShowHistory(true)}>รวมประวัติ</button></div><div className="pa-ticket-list">{bookings.filter(booking => showHistory || currentBookingVisible(booking)).map(booking => <PlayerBookingCard key={booking.id} booking={booking} session={sessions.find(s => s.id === booking.sessionId)} now={clockNow} busy={busy} token={token} config={config} renew={() => void renewReservation(booking)} browse={() => navigate(booking.kind === 'coaching' ? 'coaches' : 'discover')} upload={file => { void uploadReceipt(booking, file); }} cancel={() => void cancelBooking(booking)} refresh={async () => setOwnBookings(await api<OwnBookings>('/bookings', { headers: { Authorization: 'Bearer ' + token } }))} openQr={async channel => (await api<{url: string}>('/payments/qr', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({kind: booking.kind || 'game', id: booking.id, channel}) })).url} />)}{!showHistory && !bookings.some(currentBookingVisible) && <p className="pa-slip-note">ไม่มีรายการปัจจุบัน ดูรายการที่ยกเลิกได้ที่รวมประวัติ</p>}</div></>: <div className="pa-empty"><Ticket size={28} /><b>ยังไม่มีการจอง</b><p>เริ่มจากเลือกก๊วนที่อยากไปเล่น</p><button type="button" onClick={() => navigate('discover')}>ไปหาก๊วน <ArrowRight size={15} /></button></div>}
       </>}
 
       {tab === 'profile' && <>

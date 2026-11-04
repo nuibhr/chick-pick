@@ -21,6 +21,10 @@ import { expiredHoldMessage, paymentHoldExpired } from '../src/bookingHold';
 import { catalogManagement, deleteCatalogEntry, pauseSession, saveSession, type CatalogKind } from './catalogManagement';
 import { manageRefund, assertRefundReferenceAvailable } from './refunds';
 import { resolveLatePayment } from './latePayments';
+import { cancelReservation } from './bookingCancellation';
+import { renewBooking } from './pilotDomain';
+import { renewLesson } from './coachingDomain';
+import { markNotificationsRead, notificationReadKey } from './playerNotifications';
 
 export type ReceiptKV = { put(key: string, value: ArrayBuffer): Promise<void>; get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>; delete(key: string): Promise<void> };
 export type PilotEnv = StripeEnv & SlipOkEnv & { TIDB_DATABASE_URL?: string; LINE_CHANNEL_ID?: string; VITE_LIFF_ID?: string; ADMIN_SESSION_SECRET?: string; ADMIN_PAIRING_TOKEN?: string; RECEIPTS?: ReceiptKV };
@@ -52,12 +56,13 @@ const audit = (actor: Actor, action: string, entityId: string, admin = false): A
 
 export async function pilotRequest(request: Request, env: PilotEnv, verify: Verify): Promise<Response | null> {
   const path = new URL(request.url).pathname;
-  const playerMutation = path === '/api/player/bookings' && request.method === 'POST' || /^\/api\/player\/bookings\/[^/]+\/(receipt|cancel)$/.test(path);
-  const coachPlayer = path === '/api/player/lessons' || /^\/api\/player\/lessons\/[^/]+\/(receipt|cancel)$/.test(path);
+  const playerMutation = path === '/api/player/bookings' && request.method === 'POST' || /^\/api\/player\/bookings\/[^/]+\/(receipt|cancel|renew)$/.test(path);
+  const coachPlayer = path === '/api/player/lessons' || /^\/api\/player\/lessons\/[^/]+\/(receipt|cancel|renew)$/.test(path);
+  const notificationPlayer = path === '/api/player/notifications/read';
   const coachPublic = path === '/api/coach-catalog' || path === '/api/venues';
   const stripePlayer = path === '/api/player/payments/checkout' || path === '/api/player/payments/sync';
   const qrPlayer = ['/api/player/payments/qr', '/api/player/payments/qr/image', '/api/player/payments/qr/view'].includes(path);
-  const handled = stripePlayer || path === '/api/stripe/webhook' || path === '/api/player/config' || path.startsWith('/api/finance/') || path.startsWith('/api/marketplace') || path === '/api/coaching' || path.startsWith('/api/coaching/') || coachPublic || coachPlayer || playerMutation;
+  const handled = notificationPlayer || stripePlayer || path === '/api/stripe/webhook' || path === '/api/player/config' || path.startsWith('/api/finance/') || path.startsWith('/api/marketplace') || path === '/api/coaching' || path.startsWith('/api/coaching/') || coachPublic || coachPlayer || playerMutation;
   if (!handled && !qrPlayer) return null;
   try {
     if (!['GET', 'POST'].includes(request.method)) fail(405, 'วิธีส่งคำขอไม่รองรับ');
@@ -146,6 +151,11 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
       return json({ authenticated: true, role: member?.role || 'owner', roles: member ? memberRoles(member) : ['owner'] }, 200, { 'Set-Cookie': await adminCookie(env.ADMIN_SESSION_SECRET, { ...actor, linkedAt: '', version: member?.version }) });
     }
     if (path === '/api/finance/logout') { if (request.method !== 'POST') fail(405, 'ใช้ POST'); return json({ success: true }, 200, { 'Set-Cookie': clearAdminCookie() }); }
+    if (notificationPlayer) {
+      if (request.method !== 'POST') fail(405, 'ใช้ POST');
+      const actor = await identity(request, env, verify), v = await body(request), key = await notificationReadKey(actor.sub);
+      return json(await db.updateDocument<{ readAt?: string }, { readAt: string }>(key, {}, saved => markNotificationsRead(saved, v), { ...audit(actor, 'notifications.read', key), entityType: 'notification' }));
+    }
     if (coachPlayer) {
       const actor = await identity(request, env, verify);
       if (path === '/api/player/lessons') {
@@ -156,7 +166,11 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
         return json({ ...result, message: 'จองเวลาแล้ว แนบสลิปและรอผู้จัดตรวจเงิน' }, result.repeated ? 200 : 201);
       }
       if (request.method !== 'POST') fail(405, 'ใช้ POST');
-      const match = path.match(/^\/api\/player\/lessons\/([^/]+)\/(receipt|cancel)$/)!, id = decodeURIComponent(match[1]);
+      const match = path.match(/^\/api\/player\/lessons\/([^/]+)\/(receipt|cancel|renew)$/)!, id = decodeURIComponent(match[1]);
+      if (match[2] === 'renew') {
+        await body(request); await limitAuth(db, 'renew:' + actor.sub);
+        return json(await db.updateFinance((docs, ctx) => renewLesson(docs, actor, id, ctx.enabled, ctx.account || undefined), audit(actor, 'coaching.renewed', id)));
+      }
       if (match[2] === 'cancel') return json(await db.updateFinance(docs => cancelLesson(docs, actor, id), audit(actor, 'coaching.cancelled', id)));
       if (!env.RECEIPTS) fail(503, 'ที่เก็บสลิปยังไม่พร้อม');
       lessonReceiptEligibility(await db.readFinance(), actor, id);
@@ -182,7 +196,11 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
         const result = await db.updateMarketplace((data, ctx) => book(data, { ...ctx, paymentProvider: 'manual' }, actor, v.sessionId as string), audit(actor, 'booking.requested', String(v.sessionId)), true);
         return json({ booking: { id: result.id }, repeated: result.repeated, message: 'ถือที่นั่งให้ 5 นาที · โอนและส่งสลิปให้ถึงระบบก่อนหมดเวลา' }, result.repeated ? 200 : 201);
       }
-      const match = path.match(/^\/api\/player\/bookings\/([^/]+)\/(receipt|cancel)$/)!; const id = decodeURIComponent(match[1]);
+      const match = path.match(/^\/api\/player\/bookings\/([^/]+)\/(receipt|cancel|renew)$/)!; const id = decodeURIComponent(match[1]);
+      if (match[2] === 'renew') {
+        await body(request); await limitAuth(db, 'renew:' + actor.sub);
+        return json(await db.updateMarketplace((data, ctx) => renewBooking(data, ctx, actor, id), audit(actor, 'booking.renewed', id), true));
+      }
       if (match[2] === 'cancel') return json(await db.updateMarketplace(data => cancel(data, actor, id), audit(actor, 'booking.cancelled', id), true));
       if (!env.RECEIPTS) fail(503, 'ที่เก็บสลิปยังไม่พร้อม');
       receiptEligibility(await db.readMarketplace(), actor, id); // Authorize before accepting image bytes or writing KV.
@@ -205,6 +223,11 @@ export async function pilotRequest(request: Request, env: PilotEnv, verify: Veri
     }
     const owner = await authenticateAdmin(request, env.ADMIN_SESSION_SECRET, db);
     authorize(owner.roles, path, request.method);
+    const unifiedCancellation = path.match(/^\/api\/(marketplace\/bookings|coaching\/enrollments)\/([^/]+)\/cancellation$/);
+    if (unifiedCancellation && request.method === 'POST') {
+      const v = await body(request), kind = unifiedCancellation[1] === 'marketplace/bookings' ? 'game' : 'coaching';
+      return json(await db.updateFinance(d => cancelReservation(d, kind, unifiedCancellation[2], v, owner, permissions(owner.roles).financeWrite), { ...audit(owner, 'reservation.cancelled', unifiedCancellation[2], true), entityType: kind === 'game' ? 'booking' : 'enrollment' }));
+    }
     const recoveryRoute = path.match(/^\/api\/(marketplace\/bookings|coaching\/enrollments)\/([^/]+)\/payment-recovery$/);
     if (recoveryRoute && request.method === 'POST') {
       const v = await body(request), kind = recoveryRoute[1] === 'marketplace/bookings' ? 'game' : 'coaching';

@@ -5,7 +5,7 @@ import PromptPayQR from './PromptPayQR';
 
 export default function PlayerTransferInstructions({ account, amount, slipok, pending, holdExpiresAt, openQr }: { account: TransferAccount | null; amount: number; slipok: boolean; pending: boolean; holdExpiresAt?: string | null; openQr?: (channel: PaymentChannelId) => Promise<string> }) {
   const options = transferOptions(account);
-  const [selected, setSelected] = useState(0), [copied, setCopied] = useState(false), [copyError, setCopyError] = useState('');
+  const [selected, setSelected] = useState(() => Math.max(0, options.findIndex(option => Boolean(paymentQrPhone(option) || paymentStaticQr(option))))), [copied, setCopied] = useState(false), [copyError, setCopyError] = useState('');
   const current = options[selected] || options[0];
   async function copy() {
     if (!current) return;

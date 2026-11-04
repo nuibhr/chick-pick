@@ -6,6 +6,6 @@ export default function SlipVerificationStatus({ verification, receiptStatus = '
     {details && <>{verification.amountSatang !== undefined && <span>ยอดที่ตรวจ ฿{(verification.amountSatang / 100).toFixed(2)} · </span>}{verification.paymentChannelLabel && <p>ช่องทางที่ตรวจผ่าน: {verification.paymentChannelLabel}</p>}{verification.reference && <span>เลขรายการ {verification.reference}</span>}</>}
     {receiptStatus === 'pending' && verification.retryAt && <p>ผู้จัดตรวจใหม่ได้หลัง {new Date(verification.retryAt).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' })} ภาพยังอยู่ในระบบ ไม่ต้องโอนซ้ำ</p>}
     {receiptStatus === 'pending' && verification.status === 'verified' && <p>รอแอดมินอนุมัติเงิน การผ่าน SlipOK ยังไม่ถือว่าได้เข้าสนาม</p>}
-    {receiptStatus === 'pending' && verification.status === 'rejected' && <p>ผู้จัดจะตรวจเหตุผลก่อนแจ้งให้ส่งใหม่ กรุณาอย่าโอนซ้ำ</p>}
+    {receiptStatus === 'pending' && verification.status === 'rejected' && <p>ผู้จัดกำลังตรวจผลและยอดเงิน กรุณารอ ไม่ต้องแนบภาพอื่นหรือโอนซ้ำ</p>}
   </div>;
 }

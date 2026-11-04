@@ -7,8 +7,9 @@ export type BookingRefund = {
   completedAt?: string; completedBy?: string; refundReference?: string;
   resolutionReason?: string;
   postSettlement?: boolean;
+  reviewReopenedAt?: string;
 };
-export type PublicRefund = Pick<BookingRefund, 'status' | 'reason' | 'receivedAmount' | 'completedAt'>;
+export type PublicRefund = Pick<BookingRefund, 'status' | 'reason' | 'receivedAmount' | 'completedAt'> & { updatedAt?: string };
 export const refundNeedsAction = (refund?: BookingRefund) => refund?.status === 'review_required' || refund?.status === 'pending';
 export const refundLabels: Record<BookingRefund['status'], string> = {
   review_required: 'ยกเลิกแล้ว · รอตรวจเงินเข้าเพื่อคืนเงิน',
@@ -17,5 +18,5 @@ export const refundLabels: Record<BookingRefund['status'], string> = {
   not_required: 'ยกเลิกแล้ว · ตรวจแล้วไม่มีเงินต้องคืน',
 };
 export function publicRefund(refund?: BookingRefund): PublicRefund | null {
-  return refund ? { status: refund.status, reason: refund.reason, receivedAmount: refund.receivedAmount, completedAt: refund.completedAt } : null;
+  return refund ? { status: refund.status, reason: refund.reason, receivedAmount: refund.receivedAmount, completedAt: refund.completedAt, updatedAt: refund.completedAt || refund.receivedAt || refund.reviewReopenedAt || refund.requestedAt } : null;
 }

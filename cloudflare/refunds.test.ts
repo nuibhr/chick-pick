@@ -82,5 +82,5 @@ test('refunds fail closed for Stripe and closed settlements; public view exclude
   const d = fixture(); d['revenue-settlements'].push({ key: 'game:game' } as any); assert.throws(() => cancel(d)); d['revenue-settlements'] = [];
   d.marketplace.bookings[0].stripe = { status: 'paid' } as any; assert.throws(() => cancel(d)); delete d.marketplace.bookings[0].stripe;
   cancel(d); received(d); const exposed = publicRefund(d.marketplace.bookings[0].refund)!;
-  assert.deepEqual(Object.keys(exposed).sort(), ['completedAt', 'reason', 'receivedAmount', 'status']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['completedAt', 'reason', 'receivedAmount', 'status', 'updatedAt']);
 });

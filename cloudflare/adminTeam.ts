@@ -63,6 +63,7 @@ export function authorize(role: RoleSelection, path: string, method: string) {
     || /^\/api\/marketplace\/bookings\/[^/]+\/admission$/.test(path) && method === 'POST' && p.operations
     || /^\/api\/marketplace\/bookings\/[^/]+\/cancel$/.test(path) && method === 'POST' && p.operations
     || /^\/api\/(marketplace\/bookings|coaching\/enrollments)\/[^/]+\/refund$/.test(path) && method === 'POST' && p.financeWrite
+    || /^\/api\/(marketplace\/bookings|coaching\/enrollments)\/[^/]+\/cancellation$/.test(path) && method === 'POST' && p.receipts
     || /^\/api\/(marketplace\/bookings|coaching\/enrollments)\/[^/]+\/payment-recovery$/.test(path) && method === 'POST' && p.receipts
     || path === '/api/coaching' && method === 'GET' && p.receipts
     || /^\/api\/coaching\/(coaches|slots)(?:\/[^/]+)?$/.test(path) && method === 'POST' && p.operations

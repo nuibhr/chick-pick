@@ -701,6 +701,53 @@ test('late payment refund is finance-only, duplicate-safe and never asserts a re
   assert.equal(report.summary.income, 19000); assert.equal(report.summary.pendingExpense, 19000); assert.equal(report.summary.expense, 0);
 });
 
+test('single cancellation API closes booking and no-money work together, rejects stale confirmation and protects finance privileges', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  f.docs.set('transfer-account', { bankName: 'test', accountName: 'test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  const player = f.player('cancel-ux'), id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, player)).json()).booking.id;
+  const upload = await pilotRequest(new Request(`https://example.com/api/player/bookings/${id}/receipt`, { method: 'POST', headers: { ...player, 'Content-Type': 'image/png' }, body: new Uint8Array([137,80,78,71,13,10,26,10,3]) }), f.env, f.verify);
+  const receiptId = (await upload!.json()).receipt.id;
+  const path = `/api/marketplace/bookings/${id}/cancellation`, command = { confirmCancellation: true, expectedReceiptId: receiptId, expectedPaidAt: null, disposition: 'no_payment', fundsChecked: true };
+  assert.equal((await f.request(path, command, player)).status, 401);
+  assert.equal((await f.request(path, command, { ...owner, Origin: 'https://evil.example' })).status, 403);
+  assert.equal((await f.request(path, { ...command, fundsChecked: false }, owner)).status, 409);
+  assert.equal(f.data.bookings[0].cancelledAt, undefined, 'failed money confirmation rolls the whole cancellation back');
+  assert.equal((await f.request(path, { ...command, expectedReceiptId: 'old' }, owner)).status, 409);
+  const results = await Promise.all([f.request(path, command, owner), f.request(path, command, owner)]);
+  assert.deepEqual(results.map(r => r.status), [200, 200]); assert.equal(f.data.bookings[0].refund?.status, 'not_required'); assert.equal(activeBooking(f.data.bookings[0]), false); assert.equal(f.images.size, 1);
+  const report = await (await f.request('/api/finance/report', undefined, owner)).json(); assert.equal(report.summary.income, 0); assert.equal(report.summary.pendingExpense, 0);
+});
+
+test('expired unpaid renewal provides a fresh payment destination and cannot overbook in a race', async t => {
+  const f = fixture(t); await f.signIn(); f.docs.set('transfer-account', { channels: [{ id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'Fixture', accountNumber: '0812345678' }] }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  for (const who of ['a', 'b', 'c', 'd']) await f.request('/api/player/bookings', { sessionId: 'game' }, f.player(who));
+  const id = f.data.bookings.at(-1)!.id; f.data.bookings.at(-1)!.holdExpiresAt = new Date(Date.now() - 1).toISOString();
+  f.docs.set('transfer-account', { channels: [{ id: 'promptpay', kind: 'promptpay', enabled: true, bankName: 'พร้อมเพย์', accountName: 'New fixture', accountNumber: '0899999999' }] });
+  const path = `/api/player/bookings/${id}/renew`;
+  assert.equal((await f.request(path, {}, f.player('stranger'))).status, 404);
+  const race = await Promise.all([f.request(path, {}, f.player('d')), f.request('/api/player/bookings', { sessionId: 'game' }, f.player('e'))]);
+  assert.equal(race.filter(r => r.status === 409).length, 1); assert.equal(f.data.bookings.filter(activeBooking).length, 4);
+  if (race[0].status === 200) {
+    const result = await race[0].json(), current = f.data.bookings.find(b => b.id === result.id)!;
+    assert.equal(current.transferAccount!.accountNumber, '0899999999'); assert.equal(f.data.bookings.find(b => b.id === id)!.transferAccount!.accountNumber, '0812345678');
+    assert.equal((await (await f.request(path, {}, f.player('d'))).json()).id, current.id);
+    const qr = await f.request('/api/player/payments/qr', { kind: 'game', id: current.id, channel: 'promptpay' }, f.player('d'));
+    assert.equal(qr.status, 200, 'new reservation can mint a fresh amount-prefilled QR'); const minted = await qr.json(); assert.match(minted.url, /qr\/view/);
+  }
+});
+
+test('notification read endpoint is authenticated, persists per LINE account and never advances on forged future timestamps', async t => {
+  const f = fixture(t); await f.signIn();
+  const path = '/api/player/notifications/read', stamp = new Date(Date.now() - 1000).toISOString();
+  assert.equal((await f.request(path, { readThrough: stamp })).status, 401);
+  const result = await f.request(path, { readThrough: stamp, playerId: 'other' }, f.player('a')); assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), { readAt: stamp });
+  const keyA = 'notification-read:' + await digest('player-a'), keyB = 'notification-read:' + await digest('player-b');
+  assert.equal((f.docs.get(keyA) as any).readAt, stamp); assert.equal(f.docs.has(keyB), false);
+  assert.equal((await f.request(path, { readThrough: new Date(Date.now() + 3600000).toISOString() }, f.player('a'))).status, 400);
+  assert.equal((f.docs.get(keyA) as any).readAt, stamp);
+});
+
 function fixture(t: TestContext) {
   const data: MarketplaceData = { sessions: [{ id:'game',title:'ก๊วนทดสอบ',venue:'สนาม',area:'ขอนแก่น',date:'',time:'18–20',price:190,joined:0,capacity:4,dupr:'<3.5',vibe:'เบา–กลาง',host:'ผู้จัด',hostRating:0,courtCount:1,venueCost:0,tags:[],startsAt:new Date(Date.now()+86400000).toISOString(),status:'open' }], bookings:[] };
   const docs = new Map<string,unknown>(), images = new Map<string,ArrayBuffer>(); let tail = Promise.resolve();

@@ -1,5 +1,13 @@
 # Chick&Pick MVP
 
+## Booking and cancellation experience — 4 November 2026
+
+The hosted Cloudflare app now cancels the reservation and records its money disposition in one transaction from the booking or slip-review screen. Finance staff can choose bank-checked no payment, money received awaiting manual refund, or money still under review; operators can cancel unpaid reservations and leave money review to finance. Stale receipt/payment snapshots are rejected. Existing receipts and audit history remain intact, and actual bank refunds still require a separate human transfer and reference. Finance can reopen a mistaken no-payment decision without restoring the cancelled seat.
+
+An expired unpaid reservation offers **renew and receive a new QR** or **already transferred: submit the original slip**. Renewal checks live capacity under the reservation lock, uses current payment settings, and preserves the old payment snapshot and evidence. An in-app notification bell shows the player's booking/payment/refund status and persists the read cursor for their LINE account. Cancelled and superseded unpaid tickets move to history; old tickets with unresolved money evidence remain visible. This is an in-app status feed, not LINE push messaging.
+
+Validation: 161 automated tests, TypeScript checking, Cloudflare build, and isolated mobile/desktop browser checks using fixture data. Customer payment and staff finance actions on actual live records still require the ordinary-member mobile acceptance check. Use the HTTPS Cloudflare app for this workflow; the local Node preview is a separate backend.
+
 ## Encrypted backups and restore drills — 3 November 2026
 
 Use `npm run backup:init` once, then `npm run backup:create` to capture a consistent TiDB snapshot plus private receipt images in an authenticated encrypted archive. `npm run backup:drill -- --file <archive.cpbackup>` creates fresh private drill resources and verifies restored table digests and every image, without changing live application bindings or business records. Existing target data is never overwritten and legacy login sessions are discarded. The first live-source backup and isolated restore were verified with 14 documents, 112 audit events and 5 KV images. See the [Thai backup and recovery runbook](BACKUP-AND-RECOVERY.md) for key custody, offline verification, manual restore preflight, limits and the separately controlled production-cutover process. These are manual commands; scheduled/off-account backups are not configured by this change.

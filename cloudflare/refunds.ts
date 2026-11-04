@@ -41,7 +41,10 @@ export function manageRefund(docs: FinanceDocuments, kind: 'game' | 'coaching', 
   }
   const refund = row.refund;
   if (!row.cancelledAt || !refund) fail(409, 'ยกเลิกการจองพร้อมบันทึกเหตุผลก่อน');
-  if (v.action === 'confirm_received') {
+  if (v.action === 'reopen_review') {
+    if (refund.status !== 'not_required' || refund.receivedAt || refund.completedAt) fail(409, 'เปิดตรวจใหม่ได้เฉพาะรายการที่ปิดว่าไม่มีเงินเข้า');
+    refund.resolutionReason = reason(v.reason); refund.status = 'review_required'; refund.reviewReopenedAt = now;
+  } else if (v.action === 'confirm_received') {
     if (refund.status !== 'review_required' || v.fundsChecked !== true) fail(409, 'ต้องอยู่ระหว่างตรวจและยืนยันเงินเข้าธนาคารจริง');
     const amount = v.receivedAmount;
     if (!Number.isSafeInteger(amount) || Number(amount) <= 0 || Number(amount) > 10000000000) fail(400, 'ระบุยอดเงินจริงเป็นสตางค์');

@@ -36,6 +36,18 @@ export function ownBooking(data: MarketplaceData, actor: Actor, id: string) {
   if (!booking) fail(404, 'ไม่พบการจองของคุณ');
   return booking;
 }
+export function renewBooking(data: MarketplaceData, context: PilotContext, actor: Actor, id: string) {
+  const old = ownBooking(data, actor, id);
+  if (old.cancelledAt || old.paidAt || stripeLocksPayment(old.stripe) || old.receipts?.some(r => r.status === 'pending' || r.verifiedTransferReference || r.verification?.status === 'verified')) fail(409, 'มีเงินหรือหลักฐานรอตรวจแล้ว กรุณารอผู้จัด และอย่าโอนซ้ำ');
+  if (!paymentHoldExpired(old)) return { id: old.id, repeated: true };
+  const result = book(data, context, actor, old.sessionId);
+  if (result.id !== old.id) {
+    old.replacementBookingId = result.id;
+    const next = data.bookings.find(b => b.id === result.id)!;
+    next.renewedFromId ||= old.id;
+  }
+  return result;
+}
 export function cancel(data: MarketplaceData, actor: Actor, id: string, organizer = false) {
   const booking = organizer ? data.bookings.find(b => b.id === id) : ownBooking(data, actor, id);
   if (!booking) fail(404, 'ไม่พบการจอง');

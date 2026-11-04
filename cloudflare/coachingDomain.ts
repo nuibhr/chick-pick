@@ -87,6 +87,15 @@ export function ownLesson(docs: FinanceDocuments, actor: Actor, id: string) {
   const e = docs.coaching.find(e => e.id === id && e.playerId === 'line:' + actor.sub);
   if (!e) fail(404, 'ไม่พบการเรียนของคุณ'); return e;
 }
+export function renewLesson(docs: FinanceDocuments, actor: Actor, id: string, enabled: boolean, account: Enrollment['transferAccount']) {
+  const old = ownLesson(docs, actor, id);
+  if (old.cancelledAt || old.payment === 'paid' || stripeLocksPayment(old.stripe) || old.receipts?.some(r => r.status === 'pending' || r.verifiedTransferReference || r.verification?.status === 'verified')) fail(409, 'มีเงินหรือหลักฐานรอตรวจแล้ว กรุณารอผู้จัด และอย่าโอนซ้ำ');
+  if (!lessonHoldExpired(old)) return { id: old.id, repeated: true };
+  if (old.lessons.length !== 1 || !old.lessons[0].slotId) fail(409, 'กรุณาเลือกเวลาเรียนใหม่จากหน้าโค้ช');
+  const result = bookLesson(docs, actor, old.lessons[0].slotId, enabled, account);
+  if (result.id !== old.id) { old.replacementBookingId = result.id; docs.coaching.find(e => e.id === result.id)!.renewedFromId ||= old.id; }
+  return result;
+}
 export function lessonReceiptEligibility(docs: FinanceDocuments, actor: Actor, id: string) {
   const e = ownLesson(docs, actor, id);
   if (e.cancelledAt || e.payment === 'paid' || stripeLocksPayment(e.stripe) || e.receipts?.at(-1)?.status === 'pending') fail(409, 'รายการนี้ปิดรับสลิป มี QR Stripe หรือมีสลิปรอตรวจ');
@@ -132,5 +141,5 @@ export function completeLesson(docs: FinanceDocuments, id: string) {
 
 export function lessonView(e: Enrollment) {
   const receipt = e.receipts?.at(-1);
-  return { kind: 'coaching' as const, id: e.id, sessionId: e.lessons[0]?.slotId || '', title: e.title, startsAt: e.lessons[0]?.start, venue: e.venue || '', hours: e.totalHours, amount: Math.round(e.amount * 100), createdAt: e.createdAt, holdExpiresAt: e.holdExpiresAt || null, paidAt: e.paidAt || null, admissionStatus: e.payment === 'paid' ? 'approved' : 'pending', cancelledAt: e.cancelledAt || null, holdExpired: lessonHoldExpired(e), latePayment: publicLatePayment(e.latePayment), refund: publicRefund(e.refund), transferAccount: publicTransferAccount(e.transferAccount), completed: e.lessons.every(l => l.status === 'completed'), stripe: stripePublicView(e.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null };
+  return { kind: 'coaching' as const, id: e.id, sessionId: e.lessons[0]?.slotId || '', title: e.title, startsAt: e.lessons[0]?.start, venue: e.venue || '', hours: e.totalHours, amount: Math.round(e.amount * 100), createdAt: e.createdAt, holdExpiresAt: e.holdExpiresAt || null, paidAt: e.paidAt || null, admissionStatus: e.payment === 'paid' ? 'approved' : 'pending', cancelledAt: e.cancelledAt || null, replacementBookingId: e.replacementBookingId || null, holdExpired: lessonHoldExpired(e), latePayment: publicLatePayment(e.latePayment), refund: publicRefund(e.refund), transferAccount: publicTransferAccount(e.transferAccount), completed: e.lessons.every(l => l.status === 'completed'), stripe: stripePublicView(e.stripe), receipt: receipt ? { id: receipt.id, status: receipt.status, submittedAt: receipt.submittedAt, reviewedAt: receipt.reviewedAt || null, ocr: receipt.ocr, verification: receipt.verification, rejectReason: receipt.rejectReason || null } : null };
 }
