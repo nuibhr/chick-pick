@@ -46,15 +46,18 @@ export function manageRefund(docs: FinanceDocuments, kind: 'game' | 'coaching', 
     refund.resolutionReason = reason(v.reason); refund.status = 'review_required'; refund.reviewReopenedAt = now;
   } else if (v.action === 'confirm_received') {
     if (refund.status !== 'review_required' || v.fundsChecked !== true) fail(409, 'ต้องอยู่ระหว่างตรวจและยืนยันเงินเข้าธนาคารจริง');
-    const amount = v.receivedAmount;
-    if (!Number.isSafeInteger(amount) || Number(amount) <= 0 || Number(amount) > 10000000000) fail(400, 'ระบุยอดเงินจริงเป็นสตางค์');
-    const ref = reference(v.transferReference), receipt = row.receipts?.find(r => r.id === v.receiptId);
+    const receipt = row.receipts?.find(r => r.id === v.receiptId), check = receipt?.verification;
     if (row.receipts?.length && !receipt) fail(400, 'เลือกสลิปต้นทางที่ตรวจเงินเข้าจริง');
+    const verified = check?.status === 'verified';
+    const amount = verified ? check.amountSatang : v.receivedAmount;
+    if (!Number.isSafeInteger(amount) || Number(amount) <= 0 || Number(amount) > 10000000000) fail(400, 'ระบุยอดเงินจริงเป็นสตางค์');
+    const ref = reference(verified ? check.reference : v.transferReference);
+    if (verified && (v.receivedAmount !== undefined && v.receivedAmount !== amount || v.transferReference !== undefined && reference(v.transferReference) !== ref)) fail(409, 'ยอดและเลขอ้างอิงต้องตรงกับผลสลิปที่ตรวจผ่าน');
     if (all.some(other => other !== row && (other.refund?.transferReference === ref || other.receipts?.some(r => r.verifiedTransferReference === ref || r.verification?.status === 'verified' && reference(r.verification.reference) === ref || (other.paidAt || other.refund?.receivedAt) && receipt?.sha256 && r.sha256 === receipt.sha256)))) fail(409, 'เงินหรือภาพสลิปนี้ถูกใช้รับเงินหรือคืนเงินกับรายการอื่นแล้ว');
-    if (receipt?.verification?.status === 'verified' && (reference(receipt.verification.reference) !== ref || receipt.verification.amountSatang !== amount)) fail(409, 'ยอดและเลขอ้างอิงต้องตรงกับผลสลิปที่ตรวจผ่าน');
     Object.assign(refund, { status: 'pending', receivedAmount: amount, transferReference: ref, ...(receipt ? { receiptId: receipt.id } : {}), receivedAt: now, receivedBy: actor.sub });
   } else if (v.action === 'no_funds') {
     if (refund.status !== 'review_required' || v.fundsChecked !== true) fail(409, 'ต้องตรวจธนาคารก่อน และไม่มีเงินที่ยืนยันรับไว้แล้ว');
+    if (row.paidAt || row.receipts?.some(r => r.verifiedTransferReference || r.status === 'approved' || r.verification?.status === 'verified')) fail(409, 'มีผลตรวจยืนยันรายการโอนแล้ว ต้องตรวจเรื่องคืนเงิน ไม่ปิดเป็นไม่มีเงินเข้า');
     refund.resolutionReason = reason(v.reason); refund.status = 'not_required';
     refund.receivedBy = actor.sub;
   } else if (v.action === 'complete') {

@@ -7,12 +7,15 @@ import { verifySlipOk, slipokConfigured, type SlipOkEnv, type SlipVerification }
 import { needsCurrencyRecheck, needsReceiverRecheck } from '../src/slipokCompatibility';
 import { digest } from './pilotAuth';
 
-function pendingReceipt(docs: FinanceDocuments, kind: 'game' | 'coaching', id: string, receiptId: string) {
+function pendingReceipt(docs: FinanceDocuments, kind: 'game' | 'coaching', id: string, receiptId: string, admin = false) {
   const row = kind === 'game' ? docs.marketplace.bookings.find(b => b.id === id) : docs.coaching.find(e => e.id === id);
   const receipt = row?.receipts?.at(-1);
   const unit = kind === 'game' ? 'game:' + (row && 'sessionId' in row ? row.sessionId : '') : 'coaching:' + id;
   if (!row || !receipt || receipt.id !== receiptId) return fail(404, 'ไม่พบสลิปที่รอตรวจ');
-  if (row.cancelledAt || row.paidAt || receipt.status !== 'pending' || !row.latePayment && docs['revenue-settlements'].some(s => s.key === unit)) fail(409, 'รายการนี้ปิดรับผลตรวจแล้ว');
+  // Finance may inspect the preserved incoming slip after cancelling the seat.
+  // This writes a verification result only; it cannot admit the player or refund money.
+  const refundReview = admin && row.cancelledAt && row.refund?.status === 'review_required' && !row.refund.receivedAt && !row.refund.completedAt;
+  if (row.cancelledAt && !refundReview || row.paidAt || receipt.status !== 'pending' || !row.latePayment && docs['revenue-settlements'].some(s => s.key === unit)) fail(409, 'รายการนี้ปิดรับผลตรวจแล้ว');
   if (!row.transferAccount) fail(409, 'การจองนี้ไม่มีบัญชีรับโอน');
   return { row, receipt, amount: kind === 'game' ? row.amount : Math.round(row.amount * 100), account: row.transferAccount! };
 }
@@ -21,7 +24,7 @@ export async function checkStoredReceipt(db: TidbDocuments, env: SlipOkEnv & { R
   if (!slipokConfigured(env) || !env.RECEIPTS) fail(503, 'ยังไม่ตั้ง SlipOK หรือที่เก็บภาพสลิป');
   const attemptId = crypto.randomUUID();
   const input = await db.updateFinance(docs => {
-    const p = pendingReceipt(docs, kind, id, receiptId), old = p.receipt.verification;
+    const p = pendingReceipt(docs, kind, id, receiptId, audit.actorType === 'admin'), old = p.receipt.verification;
     const currencyRecovery = audit.actorType === 'admin' && needsCurrencyRecheck(old);
     const receiverRecovery = audit.actorType === 'admin' && needsReceiverRecheck(old);
     const recovery = currencyRecovery || receiverRecovery;
@@ -39,7 +42,7 @@ export async function checkStoredReceipt(db: TidbDocuments, env: SlipOkEnv & { R
     result = await verifySlipOk(env, image, input.mimeType, input.amount, input.account, input.bookedAt, fetch, input.recovery);
   } catch { result = { provider: 'slipok', status: 'retry', checkedAt: new Date().toISOString(), retryAt: new Date(Date.now() + 60000).toISOString(), message: 'ภาพหรือบริการตรวจยังไม่พร้อม กรุณาตรวจใหม่' }; }
   return db.updateFinance(docs => {
-    const p = pendingReceipt(docs, kind, id, receiptId);
+    const p = pendingReceipt(docs, kind, id, receiptId, audit.actorType === 'admin');
     if (p.receipt.verification?.attemptId !== attemptId) fail(409, 'ผลตรวจเปลี่ยนแล้ว กรุณาโหลดข้อมูลใหม่');
     if (result.status === 'verified') {
       if (p.amount !== input.amount || JSON.stringify(p.account) !== JSON.stringify(input.account)) fail(409, 'ยอดหรือบัญชีเปลี่ยนระหว่างตรวจ');

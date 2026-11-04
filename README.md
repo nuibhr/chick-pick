@@ -6,7 +6,9 @@ The hosted Cloudflare app now cancels the reservation and records its money disp
 
 An expired unpaid reservation offers **renew and receive a new QR** or **already transferred: submit the original slip**. Renewal checks live capacity under the reservation lock, uses current payment settings, and preserves the old payment snapshot and evidence. An in-app notification bell shows the player's booking/payment/refund status and persists the read cursor for their LINE account. Cancelled and superseded unpaid tickets move to history; old tickets with unresolved money evidence remain visible. This is an in-app status feed, not LINE push messaging.
 
-Validation: 161 automated tests, TypeScript checking, Cloudflare build, and isolated mobile/desktop browser checks using fixture data. Customer payment and staff finance actions on actual live records still require the ordinary-member mobile acceptance check. Use the HTTPS Cloudflare app for this workflow; the local Node preview is a separate backend.
+The refund page derives verified incoming amounts and bank references directly from the selected SlipOK result on the server, with no editable incoming fields. Pending preserved slips can be checked during an unresolved cancellation money review without restoring the seat. Selecting different evidence or receiving a new result resets the bank-check confirmation. Failed/unavailable checks retain an explicit manual bank-review fallback; outgoing refund references still belong to a separate human bank transfer.
+
+Validation: 168 automated tests, TypeScript checking, Cloudflare build, and isolated mobile/desktop browser checks using fixture data. Customer payment and staff finance actions on actual live records still require the ordinary-member mobile acceptance check. Use the HTTPS Cloudflare app for this workflow; the local Node preview is a separate backend.
 
 ## Encrypted backups and restore drills — 3 November 2026
 

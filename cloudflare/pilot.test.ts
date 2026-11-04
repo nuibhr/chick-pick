@@ -17,6 +17,50 @@ import generatePayload from 'promptpay-qr';
 import { activeBooking } from '../src/marketplaceTypes';
 import { publicSession } from './tidbPreview';
 import { legacyReceiverFailure } from '../src/slipokCompatibility';
+
+test('cancelled money-review slip can be verified and filled automatically without reviving a seat or completing a refund', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  Object.assign(f.env, { SLIPOK_API_KEY: 'fixture-private-secret', SLIPOK_BRANCH_ID: '77946' });
+  f.docs.set('transfer-account', { bankName: 'KBANK', accountName: 'Test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  const player = f.player('cancelled-refund');
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, player)).json()).booking.id;
+  const row = f.data.bookings.find(b => b.id === id)!;
+  row.receipts = [{ id: 'preserved-slip', fileName: 'test.png', mimeType: 'image/png', size: 8, status: 'pending', submittedAt: new Date().toISOString(), ocr: { status: 'unavailable', amount: null, transferredAt: null, reference: null, sender: null, receiver: null, rawText: null, confidence: null } }];
+  f.images.set('receipt:preserved-slip', new Uint8Array([137,80,78,71,13,10,26,10]).buffer);
+  const base = '/api/marketplace/bookings/' + id, refund = base + '/refund', verify = base + '/receipts/preserved-slip/verify';
+  await f.request(refund, { action: 'cancel', reason: 'ยกเลิกที่นั่งและตรวจเรื่องเงิน', confirmCancellation: true }, owner);
+  let calls = 0; t.mock.method(globalThis, 'fetch', async () => { calls++; return Response.json(slipOKPayload()); });
+  assert.equal((await f.request(verify, {}, player)).status, 401);
+  assert.equal((await f.request(verify, {}, { ...owner, Origin: 'https://evil.example' })).status, 403);
+  assert.equal((await f.request(verify, {}, owner)).status, 200);
+  const saved = f.data.bookings.find(b => b.id === id)!;
+  assert.equal(saved.receipts![0].verification!.status, 'verified'); assert.equal(calls, 1);
+  assert.ok(saved.cancelledAt); assert.equal(saved.paidAt, undefined); assert.equal(saved.admissionStatus, 'pending'); assert.equal(saved.refund!.status, 'review_required');
+  assert.equal((await (await f.request('/api/finance/report', undefined, owner)).json()).summary.income, 0);
+  assert.equal((await f.request(base + '/receipts/preserved-slip/review', { action: 'approve', fundsChecked: true }, owner)).status, 409);
+  assert.equal((await f.request(refund, { action: 'no_funds', fundsChecked: true, reason: 'หน้าที่เปิดไว้เก่าก่อนผลตรวจผ่าน' }, owner)).status, 409);
+  const incoming = { action: 'confirm_received', receiptId: 'preserved-slip', fundsChecked: true };
+  assert.equal((await f.request(refund, { ...incoming, receivedAmount: 1, transferReference: 'FORGED123456' }, owner)).status, 409);
+  assert.equal((await f.request(refund, incoming, owner)).status, 200);
+  assert.equal(f.data.bookings[0].refund!.transferReference, 'SLIPOKTEST0001'); assert.equal(f.data.bookings[0].refund!.receivedAmount, 19000);
+  assert.equal(f.data.bookings[0].refund!.status, 'pending'); assert.equal(f.data.bookings[0].refund!.completedAt, undefined); assert.equal(f.images.size, 1);
+});
+
+test('closed and legacy cancelled records cannot trigger SlipOK checks outside an unresolved money review', async t => {
+  const f = fixture(t), owner = await f.signIn();
+  Object.assign(f.env, { SLIPOK_API_KEY: 'fixture-private-secret', SLIPOK_BRANCH_ID: '77946' });
+  f.docs.set('transfer-account', { bankName: 'KBANK', accountName: 'Test', accountNumber: '0000000000' }); f.docs.set('worker-pilot', { bookingEnabled: true });
+  const id = (await (await f.request('/api/player/bookings', { sessionId: 'game' }, f.player('closed-refund'))).json()).booking.id;
+  f.data.bookings[0].receipts = [{ id: 'slip', fileName: 'test.png', mimeType: 'image/png', size: 8, status: 'pending', submittedAt: new Date().toISOString(), ocr: { status: 'unavailable', amount: null, transferredAt: null, reference: null, sender: null, receiver: null, rawText: null, confidence: null } }];
+  const base = '/api/marketplace/bookings/' + id;
+  await f.request(base + '/refund', { action: 'cancel', reason: 'ยกเลิกและตรวจเงิน', confirmCancellation: true }, owner);
+  await f.request(base + '/refund', { action: 'no_funds', fundsChecked: true, reason: 'ตรวจรายการธนาคารแล้วไม่พบเงินเข้า' }, owner);
+  let calls = 0; t.mock.method(globalThis, 'fetch', async () => { calls++; return Response.json(slipOKPayload()); });
+  assert.equal((await f.request(base + '/receipts/slip/verify', {}, owner)).status, 409);
+  delete f.data.bookings[0].refund;
+  assert.equal((await f.request(base + '/receipts/slip/verify', {}, owner)).status, 409);
+  assert.equal(calls, 0); assert.equal(f.data.bookings[0].paidAt, undefined);
+});
 const stripeAudit = { actorId: 'test', actorType: 'admin' as const, action: 'test.stripe', entityId: 'fixture' };
 
 test('admin rechecks local recipient parser failures against the original hashed image without bypassing duplicate or upstream rejection', async t => {

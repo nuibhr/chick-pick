@@ -84,3 +84,28 @@ test('refunds fail closed for Stripe and closed settlements; public view exclude
   cancel(d); received(d); const exposed = publicRefund(d.marketplace.bookings[0].refund)!;
   assert.deepEqual(Object.keys(exposed).sort(), ['completedAt', 'reason', 'receivedAmount', 'status', 'updatedAt']);
 });
+
+test('refund incoming confirmation derives verified amount and reference on the server and rejects forged values', () => {
+  const d = fixture(), r = d.marketplace.bookings[0].receipts![0];
+  r.verification = { provider: 'slipok', status: 'verified', checkedAt: stamp, message: 'Verified', amountSatang: 19000, reference: 'BANK123456' };
+  cancel(d);
+  const command = { action: 'confirm_received', receiptId: r.id, fundsChecked: true };
+  assert.throws(() => manageRefund(d, 'game', 'booking', { ...command, receivedAmount: 1 }, actor));
+  assert.throws(() => manageRefund(d, 'game', 'booking', { ...command, transferReference: 'FORGED123456' }, actor));
+  assert.equal(d.marketplace.bookings[0].refund!.status, 'review_required');
+  assert.throws(() => manageRefund(d, 'game', 'booking', { action: 'no_funds', fundsChecked: true, reason: 'ปิดจากหน้าที่เปิดค้างไว้' }, actor));
+  manageRefund(d, 'game', 'booking', command, actor);
+  assert.equal(d.marketplace.bookings[0].refund!.receivedAmount, 19000);
+  assert.equal(d.marketplace.bookings[0].refund!.transferReference, 'BANK123456');
+  assert.equal(d.marketplace.bookings[0].refund!.status, 'pending');
+  assert.equal(d.marketplace.bookings[0].refund!.completedAt, undefined);
+});
+
+test('unverified or incomplete verification cannot supply incoming reference implicitly from OCR or booking price', () => {
+  const d = fixture(); d.marketplace.bookings[0].receipts![0].ocr.reference = 'OCR123456'; cancel(d);
+  const command = { action: 'confirm_received', receiptId: 'slip', fundsChecked: true };
+  assert.throws(() => manageRefund(d, 'game', 'booking', command, actor));
+  d.marketplace.bookings[0].receipts![0].verification = { provider: 'slipok', status: 'verified', checkedAt: stamp, message: 'Incomplete' };
+  assert.throws(() => manageRefund(d, 'game', 'booking', command, actor));
+  assert.equal(d.marketplace.bookings[0].refund!.status, 'review_required');
+});
