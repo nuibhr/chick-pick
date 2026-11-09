@@ -1,5 +1,9 @@
 # Chick&Pick MVP
 
+## LIFF security update — 9 November 2026
+
+LIFF is pinned to 2.31.2 in both npm and pnpm lockfiles. Every build checks that the installed SDK and lockfiles agree and rejects affected SDK versions below 2.31.1. HTML entry pages use `Cache-Control: no-store`; Vite creates new content-hashed URLs for the patched SDK and importing chunks. Existing open app tabs still need to be closed and reopened. No payment records, LINE channel identity or login credentials are changed by this update. See [LINE's advisory](https://developers.line.biz/en/news/2026/10/20/liff-sdk-issue/).
+
 ## Booking and cancellation experience — 4 November 2026
 
 The hosted Cloudflare app now cancels the reservation and records its money disposition in one transaction from the booking or slip-review screen. Finance staff can choose bank-checked no payment, money received awaiting manual refund, or money still under review; operators can cancel unpaid reservations and leave money review to finance. Stale receipt/payment snapshots are rejected. Existing receipts and audit history remain intact, and actual bank refunds still require a separate human transfer and reference. Finance can reopen a mistaken no-payment decision without restoring the cancelled seat.

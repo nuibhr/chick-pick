@@ -1,6 +1,7 @@
 // Leave LINE's SDK, login redirect and camera upload usable; stricter receipt/QR CSPs win.
 export function secureResponse(response: Response): Response {
   const headers = new Headers(response.headers);
+  if (headers.get('Content-Type')?.toLowerCase().includes('text/html')) headers.set('Cache-Control', 'no-store');
   const baseline = {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',

@@ -13,6 +13,7 @@ test('Worker blocks source/env paths, protects asset/API headers and keeps recei
   }
   const app = await worker.fetch(new Request('https://example.com/miniapp'), env);
   assert.equal(app.status, 200); assert.equal(app.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(app.headers.get('cache-control'), 'no-store');
   assert.equal(app.headers.get('referrer-policy'), 'no-referrer'); assert.equal(app.headers.get('x-frame-options'), 'DENY');
   assert.match(app.headers.get('content-security-policy')!, /frame-ancestors 'none'/);
   assert.match(app.headers.get('permissions-policy')!, /camera=\(self\)/);
